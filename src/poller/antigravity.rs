@@ -2,6 +2,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
+use std::os::windows::process::CommandExt;
+use std::process::Command;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -10,6 +13,7 @@ use crate::diagnose;
 use crate::models::{UsageData, UsageSection};
 
 const ANTIGRAVITY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const ANTIGRAVITY_ENDPOINTS: &[&str] = &[
     "https://daily-cloudcode-pa.googleapis.com",
     "https://daily-cloudcode-pa.sandbox.googleapis.com",
@@ -113,7 +117,92 @@ pub(super) fn poll_antigravity() -> Result<UsageData, PollError> {
         }
     };
 
-    fetch_antigravity_usage(&creds.access_token)
+    match fetch_antigravity_usage(&creds.access_token) {
+        Err(PollError::AuthRequired) => {
+            cli_refresh_antigravity_token();
+            let refreshed = read_antigravity_credentials().ok_or(PollError::AuthRequired)?;
+            if refreshed.access_token == creds.access_token {
+                diagnose::log("Antigravity credential unchanged after refresh; sign in again");
+                return Err(PollError::AuthRequired);
+            }
+            fetch_antigravity_usage(&refreshed.access_token)
+        }
+        result => result,
+    }
+}
+
+/// Renew the stored Antigravity token by running the CLI.
+///
+/// The access token in the credential store expires after an hour and only
+/// the IDE or the CLI ever rewrites it, so an account that is signed in
+/// perfectly well still answers 401 for every hour it sits idle. Listing
+/// models is the cheapest authenticated call available: the CLI refreshes the
+/// credential on the way, and no conversation quota is spent. This mirrors
+/// what the Claude and Codex pollers already do with their own CLIs.
+fn cli_refresh_antigravity_token() {
+    let agy_path = resolve_windows_agy_path();
+    diagnose::log(format!(
+        "attempting Antigravity token refresh via {agy_path}"
+    ));
+
+    let mut command = Command::new(&agy_path);
+    command
+        .arg("models")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            diagnose::log_error("unable to spawn Antigravity token refresh", error);
+            return;
+        }
+    };
+    wait_for_refresh(&mut child);
+}
+
+fn resolve_windows_agy_path() -> String {
+    for name in ["agy.exe", "agy.cmd", "agy"] {
+        if Command::new(name)
+            .arg("--version")
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return name.to_string();
+        }
+    }
+
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let installed = std::path::Path::new(&local_app_data)
+            .join("agy")
+            .join("bin")
+            .join("agy.exe");
+        if installed.exists() {
+            return installed.to_string_lossy().into_owned();
+        }
+    }
+
+    "agy.exe".to_string()
+}
+
+fn wait_for_refresh(child: &mut std::process::Child) {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() > Duration::from_secs(30) => {
+                let _ = child.kill();
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(500)),
+            Err(_) => break,
+        }
+    }
 }
 
 pub(super) fn antigravity_credential_watch_signature() -> String {
