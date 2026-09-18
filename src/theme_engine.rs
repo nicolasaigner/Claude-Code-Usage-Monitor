@@ -1512,6 +1512,31 @@ impl DataContext {
             &format!("{name}.monthly.available"),
             monthly.is_some() as u8 as f64,
         );
+        // An allowance inside a window rather than beside it: Claude's
+        // per-model weekly limit, a Codex reserve pool. Most accounts report
+        // none, so a theme gates its third gauge on `scoped.available` and
+        // stays at two gauges everywhere else.
+        let scoped = usage.and_then(|usage| usage.scoped.as_ref());
+        let scoped_percentage = scoped.map(|scoped| scoped.percentage).unwrap_or(0.0);
+        self.insert(&format!("{name}.scoped.percentage"), scoped_percentage);
+        self.insert(
+            &format!("{name}.scoped.remaining"),
+            100.0 - scoped_percentage,
+        );
+        self.insert(
+            &format!("{name}.scoped.display"),
+            display(scoped_percentage),
+        );
+        self.insert(
+            &format!("{name}.scoped.available"),
+            scoped.is_some() as u8 as f64,
+        );
+        self.insert_string(
+            &format!("{name}.scoped.label"),
+            usage
+                .and_then(|usage| usage.scoped_label.as_deref())
+                .unwrap_or_default(),
+        );
         self.insert(&format!("{name}.available"), usage.is_some() as u8 as f64);
         // Carried over from an earlier poll: real figures, not current ones.
         self.insert(
@@ -1550,7 +1575,10 @@ impl DataContext {
         // leaves it reporting 0% while another allowance is spent.
         let headline = match credits {
             Some(credits) => credits.percentage,
-            None => five_hour.max(weekly),
+            // A scoped allowance counts here too. Leaving it out lets the
+            // badge report the weekly figure while a per-model limit inside
+            // that same window is the one refusing work.
+            None => five_hour.max(weekly).max(scoped_percentage),
         };
         self.insert(&format!("{name}.headline.percentage"), headline);
         self.insert(&format!("{name}.headline.remaining"), 100.0 - headline);
@@ -1596,11 +1624,13 @@ impl DataContext {
         }
         let (monthly_unix, monthly_seconds) =
             reset_value(monthly.and_then(|value| value.resets_at));
+        let (scoped_unix, scoped_seconds) = reset_value(scoped.and_then(|value| value.resets_at));
         for (window, unix, seconds) in [
             ("session", session_unix, session_seconds),
             ("five_hour", five_hour_unix, five_hour_seconds),
             ("weekly", weekly_unix, weekly_seconds),
             ("monthly", monthly_unix, monthly_seconds),
+            ("scoped", scoped_unix, scoped_seconds),
         ] {
             self.insert(&format!("{name}.{window}.reset.unix"), unix);
             self.insert(&format!("{name}.{window}.reset.seconds"), seconds);

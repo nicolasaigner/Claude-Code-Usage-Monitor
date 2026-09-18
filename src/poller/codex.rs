@@ -27,7 +27,22 @@ struct CodexTokenData {
 #[derive(Deserialize)]
 pub(super) struct CodexUsageResponse {
     rate_limit: Option<Option<Box<CodexRateLimitDetails>>>,
+    /// Allowances that sit beside the plan's own windows, one per reserve
+    /// pool. They run out independently, so an account can be blocked on one
+    /// of these while `rate_limit` still reports room.
+    #[serde(default)]
+    additional_rate_limits: Vec<CodexAdditionalRateLimit>,
     credits: Option<Option<Box<CodexCredits>>>,
+}
+
+#[derive(Deserialize)]
+struct CodexAdditionalRateLimit {
+    #[serde(default)]
+    limit_name: Option<String>,
+    #[serde(default)]
+    normal_model_slug: Option<String>,
+    #[serde(default)]
+    rate_limit: Option<CodexRateLimitDetails>,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +195,11 @@ fn codex_usage_from_response_at(
         }
     }
 
+    if let Some((section, label)) = codex_scoped_limit(&response.additional_rate_limits) {
+        data.scoped = Some(section);
+        data.scoped_label = label;
+    }
+
     data.credits = credits.and_then(|credits| {
         let state_path = path.map(|path| {
             app_settings::app_data_directory().join(credit_state_file_name(path, account_id))
@@ -286,6 +306,34 @@ fn window_is_weekly(window: &CodexRateLimitWindow) -> Option<bool> {
     window
         .limit_window_seconds
         .map(|seconds| seconds >= WEEKLY_WINDOW_THRESHOLD_SECONDS)
+}
+
+/// The reserve pool closest to its ceiling, named as the API names it.
+///
+/// Each pool carries its own pair of windows, so the one nearer its limit is
+/// what the gauge should follow -- the same rule the headline percentage
+/// applies to the two plan windows.
+fn codex_scoped_limit(
+    limits: &[CodexAdditionalRateLimit],
+) -> Option<(UsageSection, Option<String>)> {
+    limits
+        .iter()
+        .filter_map(|limit| {
+            let details = limit.rate_limit.as_ref()?;
+            let window = [&details.primary_window, &details.secondary_window]
+                .into_iter()
+                .filter_map(|window| window.as_ref().and_then(|window| window.as_deref()))
+                .max_by(|left, right| left.used_percent.total_cmp(&right.used_percent))?;
+            let label = limit
+                .limit_name
+                .as_deref()
+                .or(limit.normal_model_slug.as_deref())
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_owned);
+            Some((codex_section_from_window(window), label))
+        })
+        .max_by(|(left, _), (right, _)| left.percentage.total_cmp(&right.percentage))
 }
 
 pub(super) fn codex_section_from_window(window: &CodexRateLimitWindow) -> UsageSection {
@@ -466,6 +514,44 @@ mod tests {
         let response: CodexUsageResponse =
             serde_json::from_str(json).expect("the fixture should deserialize");
         codex_usage_from_response(response, None).expect("the fixture should carry rate limits")
+    }
+
+    #[test]
+    fn a_reserve_pool_becomes_the_scoped_gauge() {
+        let data = usage_from_json(
+            r#"{
+                "rate_limit": {
+                    "primary_window": {"used_percent": 0, "reset_at": 1789782056,
+                                       "limit_window_seconds": 18000},
+                    "secondary_window": {"used_percent": 42, "reset_at": 1790107540,
+                                         "limit_window_seconds": 604800}
+                },
+                "additional_rate_limits": [
+                    {"limit_name": "reserve", "normal_model_slug": "a-model",
+                     "rate_limit": {
+                        "primary_window": {"used_percent": 61, "reset_at": 1790368856,
+                                           "limit_window_seconds": 604800},
+                        "secondary_window": null
+                     }}
+                ]
+            }"#,
+        );
+        assert_eq!(data.session.percentage, 0.0);
+        assert_eq!(data.weekly.percentage, 42.0);
+        let scoped = data.scoped.expect("the reserve pool should be reported");
+        assert_eq!(scoped.percentage, 61.0);
+        // The pool's own name, never the model slug, while it has one.
+        assert_eq!(data.scoped_label.as_deref(), Some("reserve"));
+    }
+
+    #[test]
+    fn an_account_without_reserve_pools_reports_no_scoped_gauge() {
+        let data = usage_from_json(
+            r#"{"rate_limit": {"primary_window": {"used_percent": 7, "reset_at": 1789782056,
+                                                  "limit_window_seconds": 18000}}}"#,
+        );
+        assert!(data.scoped.is_none());
+        assert!(data.scoped_label.is_none());
     }
 
     fn credits(balance: &str, has_credits: bool) -> CodexCredits {

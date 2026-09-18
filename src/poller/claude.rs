@@ -11,7 +11,7 @@ use super::{
     PollError,
 };
 use crate::diagnose;
-use crate::models::{CreditsSection, UsageData};
+use crate::models::{CreditsSection, UsageData, UsageSection};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -22,7 +22,35 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 struct UsageResponse {
     five_hour: Option<UsageBucket>,
     seven_day: Option<UsageBucket>,
+    /// Every limit the account is under, including the two windows above.
+    /// What only this list carries is a limit with a `scope`: an allowance
+    /// spent by one model rather than by the plan as a whole, which can sit
+    /// at its ceiling while `seven_day` still reports room.
+    #[serde(default)]
+    limits: Vec<UsageLimit>,
     spend: Option<SpendResponse>,
+}
+
+#[derive(Deserialize)]
+struct UsageLimit {
+    #[serde(default)]
+    percent: Option<f64>,
+    #[serde(default)]
+    resets_at: Option<String>,
+    #[serde(default)]
+    scope: Option<UsageScope>,
+}
+
+#[derive(Deserialize)]
+struct UsageScope {
+    #[serde(default)]
+    model: Option<UsageScopeModel>,
+}
+
+#[derive(Deserialize)]
+struct UsageScopeModel {
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 /// Paid credits that carry the account past its plan limits. Amounts are
@@ -234,12 +262,42 @@ fn usage_from_response(response: UsageResponse) -> UsageData {
         data.weekly.resets_at = parse_iso8601(bucket.resets_at.as_deref());
     }
 
+    if let Some(limit) = most_constrained_scoped_limit(&response.limits) {
+        data.scoped = Some(UsageSection {
+            available: true,
+            percentage: limit.percent.unwrap_or(0.0),
+            resets_at: parse_iso8601(limit.resets_at.as_deref()),
+        });
+        data.scoped_label = limit
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.model.as_ref())
+            .and_then(|model| model.display_name.clone())
+            .filter(|label| !label.trim().is_empty());
+    }
+
     data.credits = response
         .spend
         .as_ref()
         .and_then(|spend| claude_credits(spend, &data));
 
     data
+}
+
+/// The scoped limit closest to its ceiling.
+///
+/// An account can be under several at once (one per model). Showing the
+/// highest keeps the gauge on whatever stops work first, which is the only
+/// reason to show a third gauge at all.
+fn most_constrained_scoped_limit(limits: &[UsageLimit]) -> Option<&UsageLimit> {
+    limits
+        .iter()
+        .filter(|limit| limit.scope.is_some())
+        .max_by(|left, right| {
+            left.percent
+                .unwrap_or(0.0)
+                .total_cmp(&right.percent.unwrap_or(0.0))
+        })
 }
 
 /// What a failed call to the usage endpoint actually tells us.
@@ -1037,6 +1095,37 @@ mod tests {
             assert!(data.session.resets_at.is_none());
             assert!(!data.weekly.available);
         }
+    }
+
+    #[test]
+    fn the_scoped_limit_is_the_one_nearest_its_ceiling() {
+        let data = usage_from_json(
+            r#"{
+                "five_hour": {"utilization": 9.0, "resets_at": null},
+                "seven_day": {"utilization": 86.0, "resets_at": null},
+                "limits": [
+                    {"kind": "weekly_all", "percent": 86, "resets_at": null, "scope": null},
+                    {"kind": "weekly_scoped", "percent": 40, "resets_at": null,
+                     "scope": {"model": {"display_name": "Sonnet"}}},
+                    {"kind": "weekly_scoped", "percent": 99, "resets_at": null,
+                     "scope": {"model": {"display_name": "Opus"}}}
+                ]
+            }"#,
+        );
+        let scoped = data.scoped.expect("a scoped limit should be reported");
+        assert!(scoped.available);
+        assert_eq!(scoped.percentage, 99.0);
+        // The window limits carry no scope, so neither may be mistaken for one.
+        assert_eq!(data.scoped_label.as_deref(), Some("Opus"));
+    }
+
+    #[test]
+    fn an_account_without_scoped_limits_reports_none() {
+        let data = usage_from_json(
+            r#"{"five_hour": {"utilization": 9.0, "resets_at": null}, "seven_day": null}"#,
+        );
+        assert!(data.scoped.is_none());
+        assert!(data.scoped_label.is_none());
     }
 
     #[test]

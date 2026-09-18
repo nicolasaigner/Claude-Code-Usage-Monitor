@@ -65,6 +65,19 @@ pub struct UsageData {
     /// Kept separate from `weekly` so themes can choose how to display it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monthly: Option<UsageSection>,
+    /// A limit that covers part of the plan rather than a whole window:
+    /// Claude's per-model weekly allowance, Codex's reserve pools. It shares
+    /// the reset time of the window it sits inside, yet runs out on its own,
+    /// so a theme that only knows `session` and `weekly` can read well below
+    /// the limit that is actually blocking. Optional, because most accounts
+    /// and every other provider report none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped: Option<UsageSection>,
+    /// What the scoped limit is measured on, in the provider's own words
+    /// (a model name, a pool name). Never assumed: a hard-coded label goes
+    /// stale the moment the plan changes which model it applies to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<CreditsSection>,
     /// True when this reading was carried over from an earlier poll because
