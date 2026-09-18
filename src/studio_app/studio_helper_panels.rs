@@ -184,6 +184,24 @@ pub(super) const TEXT_TEMPLATE_VALUES: &[TextTemplateValue] = &[
         kind: TextTemplateValueKind::Duration,
     },
     TextTemplateValue {
+        group: "Claude Code",
+        label: "Scoped limit used",
+        expression: "claude.scoped.percentage",
+        kind: TextTemplateValueKind::Percentage,
+    },
+    TextTemplateValue {
+        group: "Claude Code",
+        label: "Scoped limit shown",
+        expression: "claude.scoped.display",
+        kind: TextTemplateValueKind::DisplayPercentage,
+    },
+    TextTemplateValue {
+        group: "Claude Code",
+        label: "Scoped limit name",
+        expression: "claude.scoped.label",
+        kind: TextTemplateValueKind::Text,
+    },
+    TextTemplateValue {
         group: "Codex",
         label: "Session summary",
         expression: "codex.session",
@@ -278,6 +296,24 @@ pub(super) const TEXT_TEMPLATE_VALUES: &[TextTemplateValue] = &[
         label: "Weekly reset",
         expression: "codex.weekly.reset.seconds",
         kind: TextTemplateValueKind::Duration,
+    },
+    TextTemplateValue {
+        group: "Codex",
+        label: "Scoped limit used",
+        expression: "codex.scoped.percentage",
+        kind: TextTemplateValueKind::Percentage,
+    },
+    TextTemplateValue {
+        group: "Codex",
+        label: "Scoped limit shown",
+        expression: "codex.scoped.display",
+        kind: TextTemplateValueKind::DisplayPercentage,
+    },
+    TextTemplateValue {
+        group: "Codex",
+        label: "Scoped limit name",
+        expression: "codex.scoped.label",
+        kind: TextTemplateValueKind::Text,
     },
     TextTemplateValue {
         group: "Codex",
