@@ -21,7 +21,7 @@
         "offset_x": 6,
         "offset_y": 0
       },
-      "width": "providers.count * (ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + 90) + max(0, providers.count - 1) * 6 + providers.opencode.enabled * 28 + providers.cursor.enabled * 18",
+      "width": "providers.claude.enabled * (ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(claude.scoped.available, 120, 90)) + providers.codex.enabled * (ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(codex.scoped.available, 140, 90)) + providers.antigravity.enabled * (ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(antigravity.scoped.available, 140, 90)) + providers.opencode.enabled * (ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(opencode.scoped.available, 140, 90)) + providers.cursor.enabled * (ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(cursor.scoped.available, 140, 90)) + max(0, providers.count - 1) * 6 + providers.opencode.enabled * 28 + providers.cursor.enabled * 18",
       "height": "46",
       "background": {
         "type": "none"
@@ -44,7 +44,7 @@
           "render": "providers.cursor.enabled",
           "visibility": "100",
           "parent": "provider-row",
-          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + 80",
+          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(cursor.scoped.available, 140, 80)",
           "height": "46",
           "background": {
             "type": "none"
@@ -101,7 +101,7 @@
           "parent": "cursor-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -169,7 +169,7 @@
           "parent": "cursor-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -272,7 +272,7 @@
           "parent": "cursor-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -305,7 +305,7 @@
           "parent": "cursor-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -317,7 +317,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{cursor.scoped.label} {cursor.scoped.display:0}%",
+            "template": "{cursor.scoped.display:0}% · {cursor.scoped.reset.seconds:duration} ({cursor.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -408,7 +408,7 @@
           "parent": "cursor-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -441,7 +441,7 @@
           "parent": "cursor-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -453,7 +453,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{cursor.scoped.label} {cursor.scoped.display:0}%",
+            "template": "{cursor.scoped.display:0}% · {cursor.scoped.reset.seconds:duration} ({cursor.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -492,7 +492,7 @@
           "render": "providers.claude.enabled",
           "visibility": "100",
           "parent": "provider-row",
-          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + 90",
+          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(claude.scoped.available, 120, 90)",
           "height": "46",
           "background": {
             "type": "none"
@@ -549,7 +549,7 @@
           "parent": "claude-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -617,7 +617,7 @@
           "parent": "claude-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -720,7 +720,7 @@
           "parent": "claude-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -753,7 +753,7 @@
           "parent": "claude-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -765,7 +765,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{claude.scoped.label} {claude.scoped.display:0}%",
+            "template": "{claude.scoped.display:0}% · {claude.scoped.reset.seconds:duration} ({claude.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -856,7 +856,7 @@
           "parent": "claude-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -889,7 +889,7 @@
           "parent": "claude-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -901,7 +901,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{claude.scoped.label} {claude.scoped.display:0}%",
+            "template": "{claude.scoped.display:0}% · {claude.scoped.reset.seconds:duration} ({claude.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -920,7 +920,7 @@
           "render": "providers.codex.enabled",
           "visibility": "100",
           "parent": "provider-row",
-          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + 90",
+          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(codex.scoped.available, 140, 90)",
           "height": "46",
           "background": {
             "type": "none"
@@ -977,7 +977,7 @@
           "parent": "codex-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1045,7 +1045,7 @@
           "parent": "codex-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1148,7 +1148,7 @@
           "parent": "codex-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1181,7 +1181,7 @@
           "parent": "codex-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1193,7 +1193,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{codex.scoped.label} {codex.scoped.display:0}%",
+            "template": "{codex.scoped.display:0}% · {codex.scoped.reset.seconds:duration} ({codex.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -1284,7 +1284,7 @@
           "parent": "codex-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1317,7 +1317,7 @@
           "parent": "codex-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1329,7 +1329,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{codex.scoped.label} {codex.scoped.display:0}%",
+            "template": "{codex.scoped.display:0}% · {codex.scoped.reset.seconds:duration} ({codex.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -1348,7 +1348,7 @@
           "render": "providers.antigravity.enabled",
           "visibility": "100",
           "parent": "provider-row",
-          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + 90",
+          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(antigravity.scoped.available, 140, 90)",
           "height": "46",
           "background": {
             "type": "none"
@@ -1405,7 +1405,7 @@
           "parent": "antigravity-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1473,7 +1473,7 @@
           "parent": "antigravity-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1576,7 +1576,7 @@
           "parent": "antigravity-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1609,7 +1609,7 @@
           "parent": "antigravity-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1621,7 +1621,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{antigravity.scoped.label} {antigravity.scoped.display:0}%",
+            "template": "{antigravity.scoped.display:0}% · {antigravity.scoped.reset.seconds:duration} ({antigravity.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -1712,7 +1712,7 @@
           "parent": "antigravity-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1745,7 +1745,7 @@
           "parent": "antigravity-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1757,7 +1757,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{antigravity.scoped.label} {antigravity.scoped.display:0}%",
+            "template": "{antigravity.scoped.display:0}% · {antigravity.scoped.reset.seconds:duration} ({antigravity.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -1776,7 +1776,7 @@
           "render": "providers.opencode.enabled",
           "visibility": "100",
           "parent": "provider-row",
-          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + 90",
+          "width": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4 + if(opencode.scoped.available, 140, 90)",
           "height": "46",
           "background": {
             "type": "none"
@@ -1833,7 +1833,7 @@
           "parent": "opencode-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -1901,7 +1901,7 @@
           "parent": "opencode-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "1",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -2004,7 +2004,7 @@
           "parent": "opencode-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -2037,7 +2037,7 @@
           "parent": "opencode-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -2049,7 +2049,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{opencode.scoped.label} {opencode.scoped.display:0}%",
+            "template": "{opencode.scoped.display:0}% · {opencode.scoped.reset.seconds:duration} ({opencode.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -2140,7 +2140,7 @@
           "parent": "opencode-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -2173,7 +2173,7 @@
           "parent": "opencode-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "31",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -2185,7 +2185,7 @@
           "gap": "0",
           "content": {
             "type": "text",
-            "template": "{opencode.scoped.label} {opencode.scoped.display:0}%",
+            "template": "{opencode.scoped.display:0}% · {opencode.scoped.reset.seconds:duration} ({opencode.scoped.label})",
             "font_family": "Segoe UI",
             "font_size": "12",
             "weight": "medium",
@@ -2241,7 +2241,7 @@
           "parent": "claude-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -2309,7 +2309,7 @@
           "parent": "claude-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -2377,7 +2377,7 @@
           "parent": "codex-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
@@ -2445,7 +2445,7 @@
           "parent": "codex-provider",
           "x": "ceil(10 / max(1, providers.count)) * 11 - 1 + 4",
           "y": "16",
-          "width": "90",
+          "width": "150",
           "height": "13",
           "background": {
             "type": "none"
