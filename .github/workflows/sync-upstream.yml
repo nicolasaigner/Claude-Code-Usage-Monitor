@@ -66,9 +66,8 @@ jobs:
             git commit --no-edit
           fi
 
-          # Plain SemVer above upstream's: patch * 100 + fork revision.
-          IFS=. read -r major minor patch <<< "${utag#v}"
-          tag="v${major}.${minor}.$((patch * 100 + 1))"
+          # Same version as upstream, tag without the "v" (see fork-release.yml).
+          tag="${utag#v}"
           git tag "$tag"
           if ! git push origin HEAD:main "$tag"; then
             fail "Upstream $utag merged cleanly but the push was refused (upstream commits that touch .github/workflows need a token with the workflow scope). Push main and $tag from a local clone."

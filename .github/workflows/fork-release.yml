@@ -1,16 +1,16 @@
 name: Fork release
 
 # Builds and publishes the fork's binary. The in-app updater reads the latest
-# release of the repository named in Cargo.toml, so fork versions must be plain
-# SemVer that sorts above the upstream release they are built on:
-#   upstream v2.14.55 -> fork v2.14.5501, v2.14.5502 for a fork-only fix.
-# Cargo.toml keeps upstream's version in the tree (so merges stay clean) and
-# the tag's version is written into it only for the build.
+# release of the repository named in Cargo.toml and compares its tag with the
+# running version, so a fork release carries upstream's own version with the
+# tag written without the "v" (e.g. 2.14.55): the updater accepts both forms,
+# and the name never collides with upstream's v2.14.55 tag.
+# A longer version (such as 2.14.5501) would not fit the Studio footer.
 
 on:
   push:
     tags:
-      - 'v*'
+      - '[0-9]*.[0-9]*.[0-9]*'
   workflow_call:
     inputs:
       tag:
@@ -33,24 +33,19 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Stamp the tag's version
+      - name: Check the tag matches Cargo.toml
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          $version = $tag.TrimStart('v')
-          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Tag $tag is not plain SemVer; the updater would ignore it." }
-          $toml = Get-Content Cargo.toml -Raw
-          # Only the package's own version, the first one in the file.
-          $toml = ([regex]'(?m)^version = "[^"]+"').Replace($toml, "version = `"$version`"", 1)
-          [IO.File]::WriteAllText("$PWD\Cargo.toml", $toml)
-          Select-String -Path Cargo.toml -Pattern '^(version|repository) = '
+          $version = ([regex]'(?m)^version = "([^"]+)"').Match((Get-Content Cargo.toml -Raw)).Groups[1].Value
+          if ($tag -ne $version) { throw "Tag $tag does not match Cargo.toml version $version." }
           "TAG=$tag" >> $env:GITHUB_ENV
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
