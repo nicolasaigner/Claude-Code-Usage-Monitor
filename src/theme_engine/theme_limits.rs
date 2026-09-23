@@ -37,6 +37,18 @@ impl DataContext {
         // Preserve ambiguity rather than guessing which active cap binds.
         if let [limit] = active.as_slice() {
             self.insert_limit(&format!("{name}.scoped"), limit, countdown);
+        } else if active.is_empty() {
+            // Claude reports its per-model weekly cap with `is_active: false`
+            // until that cap is the one binding, so a theme gauge bound to
+            // `scoped` would stay empty all week. With no active cap to
+            // defer to, follow the scoped limit closest to its ceiling.
+            let tightest = limits
+                .iter()
+                .filter(|limit| limit.scope.is_some() || limit.model.is_some())
+                .max_by(|left, right| left.usage.percentage.total_cmp(&right.usage.percentage));
+            if let Some(limit) = tightest {
+                self.insert_limit(&format!("{name}.scoped"), limit, countdown);
+            }
         }
     }
 
@@ -299,6 +311,36 @@ mod tests {
             context.get("claude.limits.weekly_scoped_fable_other.available"),
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn with_no_active_scoped_cap_the_tightest_scoped_limit_is_followed() {
+        let mut fable = limit();
+        fable.is_active = false;
+        fable.usage.percentage = 5.0;
+        let mut quieter = fable.clone();
+        quieter.key = "weekly_scoped_other".into();
+        quieter.label = "Other".into();
+        quieter.model = Some("Other".into());
+        quieter.usage.percentage = 2.0;
+        let mut session = fable.clone();
+        session.key = "session".into();
+        session.kind = "session".into();
+        session.label = "session".into();
+        session.model = None;
+        session.is_active = true;
+        session.usage.percentage = 10.0;
+        let data = AppUsageData::from_iter([(
+            ProviderId::Claude,
+            UsageData {
+                limits: vec![session, quieter, fable],
+                ..Default::default()
+            },
+        )]);
+        let context = DataContext::from_usage(Some(&data), &Canvas::default());
+        assert_eq!(context.get("claude.scoped.available"), Some(1.0));
+        assert_eq!(context.get("claude.scoped.percentage"), Some(5.0));
+        assert_eq!(format_template("{claude.scoped.label}", &context), "Fable");
     }
 
     #[test]
