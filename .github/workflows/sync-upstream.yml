@@ -1,0 +1,83 @@
+name: Sync upstream
+
+# Merges each new upstream release into main and publishes a fork release on
+# top of it, so the fork follows upstream without losing its own commits.
+# A conflict (or a push the default token may not make) opens an issue and
+# stops; nothing is force-pushed.
+
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.merge.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge the latest upstream release
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/CodeZeno/Claude-Code-Usage-Monitor.git
+          git fetch upstream --tags --force
+
+          utag=$(git tag --merged upstream/main --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+          echo "Latest upstream release: $utag"
+          if git merge-base --is-ancestor "$utag" HEAD; then
+            echo "Already on $utag, nothing to do."
+            exit 0
+          fi
+
+          fail() {
+            gh issue create --title "Sync with upstream $utag needs attention" \
+              --body "$1"$'\n\n'"Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" || true
+            exit 1
+          }
+
+          if ! git merge --no-edit "$utag"; then
+            # The fork replaces upstream's release workflow; keep it deleted.
+            if git status --porcelain | grep -q '^.. .github/workflows/release.yml$'; then
+              git rm -q .github/workflows/release.yml || true
+            fi
+            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+              files=$(git diff --name-only --diff-filter=U | sed 's/^/- /')
+              git merge --abort
+              fail "Merging upstream $utag into main conflicts in:"$'\n'"$files"$'\n\n'"Resolve locally: \`git fetch upstream --tags && git merge $utag\`, then push main and tag it."
+            fi
+            git commit --no-edit
+          fi
+
+          # Plain SemVer above upstream's: patch * 100 + fork revision.
+          IFS=. read -r major minor patch <<< "${utag#v}"
+          tag="v${major}.${minor}.$((patch * 100 + 1))"
+          git tag "$tag"
+          if ! git push origin HEAD:main "$tag"; then
+            fail "Upstream $utag merged cleanly but the push was refused (upstream commits that touch .github/workflows need a token with the workflow scope). Push main and $tag from a local clone."
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: sync
+    if: needs.sync.outputs.tag != ''
+    uses: ./.github/workflows/fork-release.yml
+    with:
+      tag: ${{ needs.sync.outputs.tag }}

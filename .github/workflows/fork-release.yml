@@ -1,0 +1,60 @@
+name: Fork release
+
+# Builds and publishes the fork's binary. The in-app updater reads the latest
+# release of the repository named in Cargo.toml, so fork versions must be plain
+# SemVer that sorts above the upstream release they are built on:
+#   upstream v2.14.55 -> fork v2.14.5501, v2.14.5502 for a fork-only fix.
+# Cargo.toml keeps upstream's version in the tree (so merges stay clean) and
+# the tag's version is written into it only for the build.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_ASSET_NAME: claude-code-usage-monitor.exe
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Stamp the tag's version
+        shell: pwsh
+        run: |
+          $tag = "${{ inputs.tag || github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Tag $tag is not plain SemVer; the updater would ignore it." }
+          $toml = Get-Content Cargo.toml -Raw
+          $toml = [regex]::Replace($toml, '(?m)^version = "[^"]+"', "version = `"$version`"", 1)
+          [IO.File]::WriteAllText("$PWD\Cargo.toml", $toml)
+          Select-String -Path Cargo.toml -Pattern '^(version|repository) = '
+          "TAG=$tag" >> $env:GITHUB_ENV
+
+      - name: Test
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: target/release/${{ env.RELEASE_ASSET_NAME }}
+          generate_release_notes: true
+          make_latest: true
