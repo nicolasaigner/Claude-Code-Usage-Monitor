@@ -40,7 +40,8 @@ jobs:
           $version = $tag.TrimStart('v')
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Tag $tag is not plain SemVer; the updater would ignore it." }
           $toml = Get-Content Cargo.toml -Raw
-          $toml = [regex]::Replace($toml, '(?m)^version = "[^"]+"', "version = `"$version`"", 1)
+          # Only the package's own version, the first one in the file.
+          $toml = ([regex]'(?m)^version = "[^"]+"').Replace($toml, "version = `"$version`"", 1)
           [IO.File]::WriteAllText("$PWD\Cargo.toml", $toml)
           Select-String -Path Cargo.toml -Pattern '^(version|repository) = '
           "TAG=$tag" >> $env:GITHUB_ENV
