@@ -8,7 +8,9 @@ use serde::Deserialize;
 use super::{build_agent, unix_to_system_time, PollError};
 use crate::app_settings;
 use crate::diagnose;
-use crate::models::{CodexCreditsState, CreditsSection, UsageData, UsageSection};
+use crate::models::{
+    limit_slug, CodexCreditsState, CreditsSection, UsageData, UsageLimit, UsageSection,
+};
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -27,7 +29,22 @@ struct CodexTokenData {
 #[derive(Deserialize)]
 pub(super) struct CodexUsageResponse {
     rate_limit: Option<Option<Box<CodexRateLimitDetails>>>,
+    /// Allowances that sit beside the plan's own windows, one per reserve
+    /// pool. They run out independently, so an account can be blocked on one
+    /// of these while `rate_limit` still reports room.
+    #[serde(default)]
+    additional_rate_limits: Option<Vec<CodexAdditionalRateLimit>>,
     credits: Option<Option<Box<CodexCredits>>>,
+}
+
+#[derive(Deserialize)]
+struct CodexAdditionalRateLimit {
+    #[serde(default)]
+    limit_name: Option<String>,
+    #[serde(default)]
+    normal_model_slug: Option<String>,
+    #[serde(default)]
+    rate_limit: Option<CodexRateLimitDetails>,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +197,8 @@ fn codex_usage_from_response_at(
         }
     }
 
+    data.limits = codex_reserve_limits(response.additional_rate_limits.as_deref());
+
     data.credits = credits.and_then(|credits| {
         let state_path = path.map(|path| {
             app_settings::app_data_directory().join(credit_state_file_name(path, account_id))
@@ -286,6 +305,52 @@ fn window_is_weekly(window: &CodexRateLimitWindow) -> Option<bool> {
     window
         .limit_window_seconds
         .map(|seconds| seconds >= WEEKLY_WINDOW_THRESHOLD_SECONDS)
+}
+
+/// Reserve pools as quota limits, named as the API names them.
+///
+/// Each pool carries its own pair of windows, so it follows the one nearer
+/// its ceiling. Only the most constrained pool is marked active: themes read
+/// `codex.scoped.*` from the single active limit, and flagging every pool
+/// would leave that shortcut empty. All pools stay under `codex.limits.*`.
+fn codex_reserve_limits(pools: Option<&[CodexAdditionalRateLimit]>) -> Vec<UsageLimit> {
+    let mut limits: Vec<UsageLimit> = pools
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|pool| {
+            let details = pool.rate_limit.as_ref()?;
+            let window = [&details.primary_window, &details.secondary_window]
+                .into_iter()
+                .filter_map(|window| window.as_ref().and_then(|window| window.as_deref()))
+                .max_by(|left, right| left.used_percent.total_cmp(&right.used_percent))?;
+            let name = |value: &Option<String>| {
+                value
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            };
+            let model_id = name(&pool.normal_model_slug);
+            let label = name(&pool.limit_name).or_else(|| model_id.clone())?;
+            Some(UsageLimit {
+                key: format!("additional_{}", limit_slug(&label)),
+                kind: "additional_rate_limit".into(),
+                label: label.clone(),
+                model: Some(label),
+                model_id,
+                scope: None,
+                is_active: false,
+                usage: codex_section_from_window(window),
+            })
+        })
+        .collect();
+    if let Some(tightest) = limits
+        .iter_mut()
+        .max_by(|left, right| left.usage.percentage.total_cmp(&right.usage.percentage))
+    {
+        tightest.is_active = true;
+    }
+    limits
 }
 
 pub(super) fn codex_section_from_window(window: &CodexRateLimitWindow) -> UsageSection {
@@ -466,6 +531,56 @@ mod tests {
         let response: CodexUsageResponse =
             serde_json::from_str(json).expect("the fixture should deserialize");
         codex_usage_from_response(response, None).expect("the fixture should carry rate limits")
+    }
+
+    #[test]
+    fn reserve_pools_become_limits_with_the_tightest_active() {
+        let data = usage_from_json(
+            r#"{
+                "rate_limit": {
+                    "primary_window": {"used_percent": 0, "reset_at": 1789782056,
+                                       "limit_window_seconds": 18000},
+                    "secondary_window": {"used_percent": 42, "reset_at": 1790107540,
+                                         "limit_window_seconds": 604800}
+                },
+                "additional_rate_limits": [
+                    {"limit_name": "reserve", "normal_model_slug": "a-model",
+                     "rate_limit": {
+                        "primary_window": {"used_percent": 61, "reset_at": 1790368856,
+                                           "limit_window_seconds": 604800},
+                        "secondary_window": null
+                     }},
+                    {"normal_model_slug": "b-model",
+                     "rate_limit": {
+                        "primary_window": {"used_percent": 12, "reset_at": 1790368856,
+                                           "limit_window_seconds": 604800}
+                     }}
+                ]
+            }"#,
+        );
+        assert_eq!(data.weekly.percentage, 42.0);
+        assert_eq!(data.limits.len(), 2);
+        let reserve = &data.limits[0];
+        // The pool's own name, never the model slug, while it has one.
+        assert_eq!(reserve.label, "reserve");
+        assert_eq!(reserve.key, "additional_reserve");
+        assert_eq!(reserve.usage.percentage, 61.0);
+        assert!(reserve.is_active);
+        assert_eq!(data.limits[1].label, "b-model");
+        assert!(!data.limits[1].is_active);
+    }
+
+    #[test]
+    fn an_account_without_reserve_pools_reports_no_limits() {
+        for json in [
+            r#"{"rate_limit": {"primary_window": {"used_percent": 7, "reset_at": 1789782056,
+                                                  "limit_window_seconds": 18000}}}"#,
+            r#"{"rate_limit": {"primary_window": {"used_percent": 7, "reset_at": 1789782056,
+                                                  "limit_window_seconds": 18000}},
+                "additional_rate_limits": null}"#,
+        ] {
+            assert!(usage_from_json(json).limits.is_empty());
+        }
     }
 
     fn credits(balance: &str, has_credits: bool) -> CodexCredits {

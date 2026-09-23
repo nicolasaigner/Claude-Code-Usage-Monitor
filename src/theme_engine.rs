@@ -1556,9 +1556,18 @@ impl DataContext {
         // limit. A provider can switch a window off entirely -- Codex has its
         // five-hour window disabled -- so binding a badge to one window alone
         // leaves it reporting 0% while another allowance is spent.
+        // An active scoped limit counts too: a per-model cap inside the same
+        // window can be the one refusing work while the weekly gauge has room.
+        let scoped = usage
+            .map(|usage| usage.limits.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter(|limit| limit.is_active)
+            .map(|limit| limit.usage.percentage)
+            .fold(0.0, f64::max);
         let headline = match credits {
             Some(credits) => credits.percentage,
-            None => five_hour.max(weekly),
+            None => five_hour.max(weekly).max(scoped),
         };
         self.insert(&format!("{name}.headline.percentage"), headline);
         self.insert(&format!("{name}.headline.remaining"), 100.0 - headline);
