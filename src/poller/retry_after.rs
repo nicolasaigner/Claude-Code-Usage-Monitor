@@ -235,10 +235,13 @@ mod tests {
                 ));
 
                 // Advance the cooldown's age without sleeping or restarting.
+                // Moving `received` back a day panics on a machine that has
+                // been up for less than that, such as a fresh CI runner, so
+                // the elapsed day comes off the delay instead.
                 {
                     let mut cooldowns = state.cooldowns.lock().unwrap();
-                    cooldowns.get_mut(&key).unwrap().received =
-                        Instant::now() - Duration::from_secs(86_400);
+                    let cooldown = cooldowns.get_mut(&key).unwrap();
+                    cooldown.delay = cooldown.delay.saturating_sub(Duration::from_secs(86_400));
                 }
                 let mut sent = false;
                 state
