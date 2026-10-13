@@ -133,7 +133,7 @@ fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
 }
 
 fn cursor_state_db_path() -> Option<PathBuf> {
-    let path = dirs::config_dir()?
+    let path = crate::known_folders::roaming_app_data_dir()?
         .join("Cursor")
         .join("User")
         .join("globalStorage")
@@ -194,6 +194,7 @@ fn fetch_cursor_usage(cookie: &str) -> Result<UsageData, PollError> {
         .header("Cookie", &cookie_header)
         .header("User-Agent", "Mozilla/5.0")
         .call()
+        .and_then(super::check_http_status)
     {
         Ok(response) => response,
         Err(ureq::Error::StatusCode(401 | 403)) => return Err(PollError::AuthRequired),

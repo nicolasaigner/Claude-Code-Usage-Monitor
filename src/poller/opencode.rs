@@ -208,6 +208,7 @@ fn fetch_go_status(
         .header("Cookie", &cookie)
         .header("User-Agent", DASHBOARD_USER_AGENT)
         .call()
+        .and_then(super::check_http_status)
     {
         Ok(response) => response,
         Err(ureq::Error::StatusCode(401 | 403)) => return Err(PollError::AuthRequired),
@@ -287,7 +288,7 @@ fn dashboard_config_paths() -> Vec<PathBuf> {
         paths.push(config_home.join("opencode-bar").join("opencode-go.json"));
         paths.push(config_home.join("opencode-quota").join("opencode-go.json"));
     }
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::known_folders::home_dir() {
         paths.push(
             home.join(".config")
                 .join("opencode-bar")

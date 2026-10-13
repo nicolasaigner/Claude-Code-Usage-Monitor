@@ -43,7 +43,7 @@ use crate::theme_engine::{
     MouseEventKind, ReferenceRegion, SurfaceNest, ThemeDocument, ThemeRuntime, VerticalAnchor,
 };
 use crate::tray_icon;
-use crate::updater::{self, InstallChannel, ReleaseDescriptor, UpdateCheckResult};
+use crate::updater::{self, AvailableUpdate, InstallChannel, ReleaseDescriptor, UpdateCheckResult};
 
 /// Copyable HWND value used by the watchdog after the UI thread publishes it.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,8 +117,12 @@ struct AppState {
     drag_start_origin: POINT,
     drag_start_client_x: i32,
     auto_ejected: bool,
+    auto_ejected_for_capacity: bool,
     auto_ejected_origin: Option<POINT>,
     auto_ejected_host: Option<app_settings::FloatingHost>,
+    /// When true, never auto-eject to floating on taskbar collisions.
+    /// The widget stays docked (but can still be dragged along the bar).
+    lock_taskbar: bool,
     is_switching_window_style: bool,
     is_snapped: bool,
     placement_override: Option<PlacementOverride>,
@@ -151,7 +155,7 @@ enum UpdateStatus {
     Checking,
     Applying,
     UpToDate,
-    Available(ReleaseDescriptor),
+    Available(AvailableUpdate),
 }
 
 fn publish_update_status(state: &AppState) {
@@ -160,15 +164,13 @@ fn publish_update_status(state: &AppState) {
         UpdateStatus::Idle | UpdateStatus::UpToDate => DashboardStatus::Idle,
         UpdateStatus::Checking => DashboardStatus::Checking,
         UpdateStatus::Applying => DashboardStatus::Applying,
-        UpdateStatus::Available(release) => {
-            DashboardStatus::Available(release.latest_version.clone())
-        }
+        UpdateStatus::Available(update) => DashboardStatus::Available(update.version().to_owned()),
     };
     crate::dashboard::publish_update_status(state.hwnd.to_hwnd(), status);
 }
 
 fn perform_update_action(hwnd: HWND) {
-    let (install_channel, release) = {
+    let update = {
         let state = lock_state();
         let Some(state) = state.as_ref() else {
             return;
@@ -179,18 +181,14 @@ fn perform_update_action(hwnd: HWND) {
         ) {
             return;
         }
-        (
-            state.install_channel,
-            match &state.update_status {
-                UpdateStatus::Available(release) => Some(release.clone()),
-                _ => None,
-            },
-        )
+        match &state.update_status {
+            UpdateStatus::Available(update) => Some(update.clone()),
+            _ => None,
+        }
     };
-    match (install_channel, release) {
-        (InstallChannel::Portable, Some(release)) => begin_update_apply(hwnd, release),
-        (InstallChannel::Winget, Some(_)) => begin_winget_update(hwnd),
-        (_, None) => begin_update_check(hwnd, true),
+    match update {
+        Some(update) => begin_update_install(hwnd, update),
+        None => begin_update_check(hwnd, true),
     }
 }
 
@@ -202,6 +200,7 @@ const IDM_FREQ_5MIN: u16 = 11;
 const IDM_FREQ_15MIN: u16 = 12;
 const IDM_FREQ_1HOUR: u16 = 13;
 const IDM_START_WITH_WINDOWS: u16 = 20;
+const IDM_LOCK_TASKBAR: u16 = 21;
 const IDM_VERSION_ACTION: u16 = 31;
 const IDM_LANG_SYSTEM: u16 = 100;
 const IDM_LANG_FIRST: u16 = 101;
@@ -233,6 +232,8 @@ fn open_web_url(hwnd: HWND, url: &str, failure_message: &'static str) {
 /// How often the watchdog thread polls for an explorer.exe restart (which
 /// recreates the taskbar and wipes our tray-icon registration).
 const TASKBAR_WATCH_INTERVAL_SECS: u64 = 2;
+
+const TASKBAR_COLLISION_REPOSITION: usize = 2;
 
 static SUPPRESS_TRAY_REPOSITION_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -540,10 +541,22 @@ fn taskbar_collision_action(state: &AppState) -> Option<usize> {
     }
     let taskbar = state.taskbar_hwnd?.to_hwnd();
     let bounds = native_interop::get_taskbar_rect(taskbar)?;
-    let occupancy = taskbar_collision::cached(taskbar, bounds)?;
+    // Do not interpret an auto-hide slide or reveal strip as a capacity change.
+    if !unsafe { IsWindowVisible(taskbar).as_bool() } || !taskbar_collision::taskbar_shown(bounds) {
+        return None;
+    }
     if state.auto_ejected {
         let target = restored_dock_rect(state, taskbar, bounds)?;
-        let margin = (20.0 * CURRENT_DPI.load(Ordering::Relaxed) as f64 / 96.0).round() as i32;
+        if taskbar_lock_applies(state) {
+            return (!positioning::taskbar_ejection_required(bounds, target, false, true))
+                .then_some(0);
+        }
+        let occupancy = taskbar_collision::cached(taskbar, bounds)?;
+        let margin = if state.auto_ejected_for_capacity {
+            0
+        } else {
+            (20.0 * CURRENT_DPI.load(Ordering::Relaxed) as f64 / 96.0).round() as i32
+        };
         occupancy.can_restore(target, margin).then_some(0)
     } else if state.embedded
         && state
@@ -552,7 +565,24 @@ fn taskbar_collision_action(state: &AppState) -> Option<usize> {
             .is_none_or(|p| p.nest != "floating")
     {
         let widget = native_interop::get_window_rect_safe(state.hwnd.to_hwnd())?;
-        occupancy.overlaps(widget).then_some(1)
+        let locked = taskbar_lock_applies(state);
+        // A layout pass during a slide can leave a stale child offset. Restore
+        // the configured position before deciding the layout cannot fit.
+        if positioning::taskbar_ejection_required(bounds, widget, false, locked)
+            && restored_dock_rect(state, taskbar, bounds).is_some_and(|target| {
+                positioning::taskbar_reposition_required(bounds, widget, target, locked)
+            })
+        {
+            return Some(TASKBAR_COLLISION_REPOSITION);
+        }
+        // Visibility fallback needs only native geometry; an unavailable or
+        // stale accessibility sample must not leave the widget clipped.
+        let overlaps_apps = if positioning::taskbar_surface_is_clipped(bounds, widget) || locked {
+            false
+        } else {
+            taskbar_collision::cached(taskbar, bounds)?.overlaps_app_controls(widget)
+        };
+        positioning::taskbar_ejection_required(bounds, widget, overlaps_apps, locked).then_some(1)
     } else {
         None
     }
@@ -633,7 +663,7 @@ fn theme_with_placement(state: &AppState, auto_ejected: bool) -> Option<ThemeDoc
             .filter(|p| p.nest == "floating")
             .map(|p| {
                 (
-                    Some(p.monitor_index),
+                    Some((p.monitor_index, p.monitor_device.clone())),
                     POINT {
                         x: p.screen_x,
                         y: p.screen_y,
@@ -644,6 +674,9 @@ fn theme_with_placement(state: &AppState, auto_ejected: bool) -> Option<ThemeDoc
     if let Some((saved_monitor, point)) = floating {
         let displays = native_interop::find_monitors();
         let selected = saved_monitor
+            .and_then(|(index, device)| {
+                positioning::resolve_saved_monitor(&displays, index, device.as_deref())
+            })
             .and_then(|index| displays.get(index).copied().map(|d| (index, d)))
             .unwrap_or_else(|| positioning::monitor_for_point(&displays, point));
         apply_floating_position(&mut theme, state, selected.0, selected.1, point);
@@ -653,14 +686,19 @@ fn theme_with_placement(state: &AppState, auto_ejected: bool) -> Option<ThemeDoc
         .filter(|p| p.nest == "taskbar")
     {
         let displays = native_interop::find_monitors();
-        let index = if p.monitor_index < displays.len() {
-            p.monitor_index
-        } else {
-            0
-        };
+        let index = positioning::resolve_saved_monitor(
+            &displays,
+            p.monitor_index,
+            p.monitor_device.as_deref(),
+        )
+        .unwrap_or(0);
         let horizontal = taskbar_is_horizontal(index);
-        let placement =
-            positioning::dock_placement(index, p.tray_offset, display_scale(index), horizontal);
+        let placement = if p.screen_x > 0 || p.screen_y > 0 {
+            let offset = if horizontal { p.screen_x } else { p.screen_y };
+            positioning::taskbar_dock_placement(index, offset, display_scale(index), horizontal)
+        } else {
+            positioning::dock_placement(index, p.tray_offset, display_scale(index), horizontal)
+        };
         positioning::override_primary_placement(&mut theme, placement);
     }
     Some(theme)
@@ -805,6 +843,7 @@ fn save_state_settings() {
             .map(|path| path.to_string_lossy().to_string());
         persisted.placement_override = s.placement_override.clone();
         persisted.floating_card_opacity = s.floating_card_opacity;
+        persisted.lock_taskbar = s.lock_taskbar;
         // The dashboard process owns its dimensions, so leave the freshly
         // loaded values unchanged when monitor actions persist settings.
         if let Err(error) = save_settings(&persisted) {
@@ -817,6 +856,22 @@ fn save_settings_or_log(settings: &SettingsFile, context: &str) {
     if let Err(error) = save_settings(settings) {
         diagnose::log(format!("{context}: {error}"));
     }
+}
+
+pub(super) fn toggle_taskbar_lock(hwnd: HWND) {
+    let enabled = {
+        let mut state = lock_state();
+        let Some(state) = state.as_mut() else {
+            return;
+        };
+        state.lock_taskbar = !state.lock_taskbar;
+        state.lock_taskbar
+    };
+    save_state_settings();
+    if enabled {
+        redock_locked_widget(hwnd);
+    }
+    diagnose::log(format!("taskbar lock toggled: {enabled}"));
 }
 
 fn tray_usage_summary_lines(
@@ -1121,10 +1176,17 @@ fn show_error_message(hwnd: HWND, title: &str, message: &str) {
     }
 }
 
-fn show_update_prompt(hwnd: HWND, strings: Strings, release: &ReleaseDescriptor) -> bool {
+fn begin_update_install(hwnd: HWND, update: AvailableUpdate) {
+    match update {
+        AvailableUpdate::Release(release) => begin_update_apply(hwnd, release),
+        AvailableUpdate::Winget { .. } => begin_winget_update(hwnd),
+    }
+}
+
+fn show_update_prompt(hwnd: HWND, strings: Strings, update: &AvailableUpdate) -> bool {
     let message = strings
         .update_prompt_now
-        .replace("{version}", &release.latest_version);
+        .replace("{version}", update.version());
 
     unsafe {
         let title_wide = native_interop::wide_str(strings.update_available);
@@ -1193,7 +1255,7 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
     std::thread::spawn(move || {
         let hwnd = send_hwnd.to_hwnd();
         let checked_at = now_unix_secs();
-        match updater::check_for_updates() {
+        match updater::check_for_updates(install_channel) {
             Ok(UpdateCheckResult::UpToDate) => {
                 {
                     let mut state = lock_state();
@@ -1216,20 +1278,17 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
                     );
                 }
             }
-            Ok(UpdateCheckResult::Available(release)) => {
+            Ok(UpdateCheckResult::Available(update)) => {
                 {
                     let mut state = lock_state();
                     if let Some(s) = state.as_mut() {
-                        s.update_status = UpdateStatus::Available(release.clone());
+                        s.update_status = UpdateStatus::Available(update.clone());
                         s.last_update_check_unix = Some(checked_at);
                     }
                 }
                 save_state_settings();
-                if interactive && show_update_prompt(hwnd, strings, &release) {
-                    match install_channel {
-                        InstallChannel::Portable => begin_update_apply(hwnd, release),
-                        InstallChannel::Winget => begin_winget_update(hwnd),
-                    }
+                if interactive && show_update_prompt(hwnd, strings, &update) {
+                    begin_update_install(hwnd, update);
                 }
                 // Keep the dashboard busy until the install prompt is dismissed.
                 if let Some(state) = lock_state().as_ref() {
@@ -1306,7 +1365,8 @@ fn begin_update_apply(hwnd: HWND, release: ReleaseDescriptor) {
                 {
                     let mut state = lock_state();
                     if let Some(s) = state.as_mut() {
-                        s.update_status = UpdateStatus::Available(release);
+                        s.update_status =
+                            UpdateStatus::Available(AvailableUpdate::Release(release));
                         publish_update_status(s);
                     }
                 }
@@ -1516,6 +1576,49 @@ fn floating_frame_for_state(
     ))
 }
 
+fn clear_auto_ejection(state: &mut AppState) {
+    state.auto_ejected = false;
+    state.auto_ejected_for_capacity = false;
+    state.auto_ejected_origin = None;
+    state.auto_ejected_host = None;
+}
+
+fn replace_active_theme(state: &mut AppState, loaded: ThemeDocument, path: Option<PathBuf>) {
+    // A fallback belongs to the configured root that was ejected. Preserve it
+    // during ordinary refreshes, but never carry it into a new theme or host.
+    let changed = state.active_theme.as_ref().is_none_or(|current| {
+        current.id != loaded.id
+            || current.surfaces.first().map(|s| (&s.id, &s.placement))
+                != loaded.surfaces.first().map(|s| (&s.id, &s.placement))
+    }) || path
+        .as_ref()
+        .is_some_and(|p| state.active_theme_path.as_ref() != Some(p));
+    if changed {
+        clear_auto_ejection(state);
+    }
+    state.active_theme = Some(loaded);
+    if path.is_some() {
+        state.active_theme_path = path;
+    }
+}
+
+fn update_configured_placement(
+    state: &mut AppState,
+    placement: Option<PlacementOverride>,
+    taskbar_index: usize,
+    tray_offset: i32,
+) {
+    if state.placement_override != placement
+        || state.taskbar_index != taskbar_index
+        || state.tray_offset != tray_offset
+    {
+        clear_auto_ejection(state);
+    }
+    state.placement_override = placement;
+    state.taskbar_index = taskbar_index;
+    state.tray_offset = tray_offset;
+}
+
 fn apply_custom_theme(
     hwnd: HWND,
     _enabled: bool,
@@ -1538,16 +1641,13 @@ fn apply_custom_theme(
             return Err("Application is not ready".into());
         };
         state.custom_theme_enabled = true;
-        state.active_theme = Some(loaded);
+        replace_active_theme(state, loaded, path);
         state.theme_clock_interval = theme_clock_interval;
         state.tray_theme_uses_current_time = tray_theme_uses_current_time;
         state.mouse_action_overrides.clear();
         state.hovered_mouse_layer = None;
         state.pending_mouse_click = None;
         state.suppress_next_left_up = false;
-        if path.is_some() {
-            state.active_theme_path = path;
-        }
         state.embedded = false;
         state.win_event_hook.take()
     };
@@ -1859,14 +1959,15 @@ pub fn run() {
     }
     diagnose::log("window::run started");
 
-    // Single-instance guard: silently exit if another instance is running.
+    // Single-instance guard: silently exit if another instance is running in this session.
+    // Use the local namespace so other users' desktop/RDP sessions remain independent.
     // Exception: when relaunched after an explorer restart (ENV_RELAUNCH set),
     // wait for the previous instance to release the mutex, then take over.
     let is_relaunch = std::env::var(ENV_RELAUNCH).is_ok();
     let mutex_name = native_interop::wide_str(&if allow_multiple {
-        format!("Global\\ClaudeCodeUsageMonitor-{}", std::process::id())
+        format!("Local\\ClaudeCodeUsageMonitor-{}", std::process::id())
     } else {
-        "Global\\ClaudeCodeUsageMonitor".to_string()
+        "Local\\ClaudeCodeUsageMonitor".to_string()
     });
     let _mutex = unsafe {
         let handle = CreateMutexW(None, true, PCWSTR::from_raw(mutex_name.as_ptr()));
@@ -2105,8 +2206,10 @@ pub fn run() {
                 drag_start_origin: POINT::default(),
                 drag_start_client_x: 0,
                 auto_ejected: false,
+                auto_ejected_for_capacity: false,
                 auto_ejected_origin: None,
                 auto_ejected_host: None,
+                lock_taskbar: settings.lock_taskbar,
                 is_switching_window_style: false,
                 is_snapped: false,
                 placement_override: settings.placement_override.clone(),
@@ -2639,7 +2742,7 @@ fn do_poll_once(hwnd: HWND) {
                             }
                         }
                         _ => {
-                            // Transient network / credential-missing errors: exponential backoff.
+                            // Transient errors: exponential backoff, respecting server cooldowns.
                             s.auth_error_paused_polling = false;
                             s.auth_watch_mode = poller::CredentialWatchMode::ActiveSource(
                                 s.providers.first().unwrap_or_default(),
@@ -2649,7 +2752,10 @@ fn do_poll_once(hwnd: HWND) {
                             let backoff = RETRY_BASE_MS.saturating_mul(
                                 1u32.checked_shl(s.retry_count - 1).unwrap_or(u32::MAX),
                             );
-                            let retry_ms = backoff.min(s.poll_interval_ms);
+                            let retry_ms = poller::retry_delay_ms(
+                                backoff.min(s.poll_interval_ms),
+                                poll_started,
+                            );
                             unsafe {
                                 let _ = KillTimer(Some(hwnd), TIMER_RESET_POLL);
                                 SetTimer(Some(hwnd), TIMER_POLL, retry_ms, None);
@@ -2795,6 +2901,7 @@ fn reload_external_settings(hwnd: HWND) {
     let language_override = settings.language.as_deref().and_then(LanguageId::from_code);
     let theme_path = settings.active_theme_path.as_ref().map(PathBuf::from);
     let providers_changed;
+    let lock_enabled;
     {
         let mut state = lock_state();
         let Some(state) = state.as_mut() else {
@@ -2809,20 +2916,101 @@ fn reload_external_settings(hwnd: HWND) {
         state.poll_interval_ms = settings.poll_interval_ms;
         state.providers = settings.enabled_providers();
         state.usage_countdown = settings.usage_countdown;
-        state.taskbar_index = settings.taskbar_index;
-        state.tray_offset = settings.tray_offset;
-        state.placement_override = settings.placement_override;
+        update_configured_placement(
+            state,
+            settings.placement_override,
+            settings.taskbar_index,
+            settings.tray_offset,
+        );
         state.floating_card_opacity = settings.floating_card_opacity;
+        state.lock_taskbar = settings.lock_taskbar;
+        lock_enabled = state.lock_taskbar;
         apply_language_to_state(state, language_override);
     }
     unsafe {
         SetTimer(Some(hwnd), TIMER_POLL, settings.poll_interval_ms, None);
     }
     let _ = apply_custom_theme(hwnd, settings.custom_theme_enabled, theme_path, None);
+    if lock_enabled {
+        // apply_custom_theme leaves the window as a popup; re-embed a
+        // previously ejected widget so the lock takes effect at once.
+        redock_locked_widget(hwnd);
+    }
     if providers_changed {
         request_poll(hwnd);
     }
     sync_tray_icon(hwnd);
+    position_at_taskbar();
+    render_layered();
+}
+
+/// Use the configured host, not the transient popup created by a drag or
+/// auto-ejection. An intentional floating placement takes precedence over the
+/// theme's authored host.
+fn taskbar_lock_applies(state: &AppState) -> bool {
+    if !state.lock_taskbar {
+        return false;
+    }
+    match state.placement_override.as_ref().map(|p| p.nest.as_str()) {
+        Some("taskbar") => true,
+        Some("floating") => false,
+        _ => state.active_theme.as_ref().is_some_and(|theme| {
+            theme.surfaces.first().is_some_and(|surface| {
+                surface
+                    .placement
+                    .nest
+                    .resolve(surface.placement.reference.region)
+                    == SurfaceNest::Taskbar
+            })
+        }),
+    }
+}
+
+fn clear_locked_auto_ejection(state: &mut AppState) -> bool {
+    if !taskbar_lock_applies(state) || !state.auto_ejected {
+        return false;
+    }
+    clear_auto_ejection(state);
+    true
+}
+
+/// Restore a locked taskbar widget after auto-ejection. Intentional floating,
+/// desktop and tray hosts retain their placement.
+fn redock_locked_widget(hwnd: HWND) {
+    let taskbar_hwnd = {
+        let mut state = lock_state();
+        let Some(state) = state.as_mut() else {
+            return;
+        };
+        // Locking suppresses collisions with app buttons, but must not restore
+        // a mostly hidden layout into the parent. Use the same rule as ejection.
+        if let Some(taskbar) = state.taskbar_hwnd.map(SendHwnd::to_hwnd) {
+            let Some(bounds) = native_interop::get_taskbar_rect(taskbar) else {
+                return;
+            };
+            let Some(target) = restored_dock_rect(state, taskbar, bounds) else {
+                return;
+            };
+            if !taskbar_collision::taskbar_shown(bounds)
+                || positioning::taskbar_ejection_required(bounds, target, false, true)
+            {
+                return;
+            }
+        }
+        if !clear_locked_auto_ejection(state) {
+            return;
+        }
+        state.is_switching_window_style = true;
+        state.taskbar_hwnd.map(|h| h.to_hwnd())
+    };
+    // Re-embed first so position_at_taskbar sees a docked window.
+    if let Some(taskbar) = taskbar_hwnd {
+        native_interop::embed_as_child(hwnd, taskbar);
+        diagnose::log("taskbar lock enabled: re-docked floating widget");
+    }
+    if let Some(state) = lock_state().as_mut() {
+        state.is_switching_window_style = false;
+    }
     position_at_taskbar();
     render_layered();
 }

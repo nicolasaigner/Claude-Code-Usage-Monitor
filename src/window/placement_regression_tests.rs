@@ -32,8 +32,10 @@ fn state_for(theme: ThemeDocument, placement: PlacementOverride) -> AppState {
         drag_start_origin: POINT::default(),
         drag_start_client_x: 0,
         auto_ejected: false,
+        auto_ejected_for_capacity: false,
         auto_ejected_origin: None,
         auto_ejected_host: None,
+        lock_taskbar: false,
         is_switching_window_style: false,
         is_snapped: false,
         placement_override: Some(placement),
@@ -58,11 +60,238 @@ fn placement(nest: &str) -> PlacementOverride {
     PlacementOverride {
         nest: nest.into(),
         monitor_index: 0,
+        monitor_device: None,
         screen_x: 0,
         screen_y: 0,
         tray_offset: 0,
         floating_host: None,
     }
+}
+
+#[test]
+fn saved_monitor_device_overrides_an_invalid_index_for_both_hosts() {
+    let displays = native_interop::find_monitors();
+    for (index, display) in displays.iter().enumerate() {
+        let device = native_interop::monitor_device_name(display.handle)
+            .expect("enumerated monitor must have a device name");
+        for nest in ["taskbar", "floating"] {
+            let mut saved = placement(nest);
+            saved.monitor_index = usize::MAX;
+            saved.monitor_device = Some(device.clone());
+            saved.screen_x = display.rect.left;
+            saved.screen_y = display.rect.top;
+            let state = state_for(ThemeDocument::starter(), saved.clone());
+            let theme = theme_with_placement(&state, false).unwrap();
+            assert_eq!(theme.surfaces[0].placement.reference.display, index);
+            assert_eq!(state.placement_override, Some(saved));
+        }
+    }
+}
+
+#[test]
+fn absent_saved_monitor_preserves_the_choice_while_using_host_fallbacks() {
+    for nest in ["taskbar", "floating"] {
+        let mut saved = placement(nest);
+        saved.monitor_index = usize::MAX;
+        saved.monitor_device = Some("missing-monitor".into());
+        saved.screen_x = 400;
+        saved.screen_y = 300;
+        let state = state_for(ThemeDocument::starter(), saved.clone());
+        let fallback = theme_with_placement(&state, false).unwrap();
+        let mut legacy = saved.clone();
+        legacy.monitor_device = None;
+        let legacy_state = state_for(ThemeDocument::starter(), legacy);
+        let expected = theme_with_placement(&legacy_state, false).unwrap();
+        assert_eq!(
+            fallback.surfaces[0].placement,
+            expected.surfaces[0].placement
+        );
+        assert_eq!(state.placement_override, Some(saved));
+    }
+}
+
+#[test]
+fn theme_selection_releases_the_previous_roots_temporary_fallback() {
+    for nest in [
+        SurfaceNest::Desktop,
+        SurfaceNest::TrayIcon,
+        SurfaceNest::Floating,
+        SurfaceNest::Taskbar,
+    ] {
+        let mut state = ejected_state();
+        let mut next = ThemeDocument::starter();
+        next.id = "new-theme".into();
+        next.surfaces[0].placement.nest = nest;
+        next.surfaces[0].placement.offset_x = 400;
+        next.surfaces[0].placement.offset_y = 300;
+        next.prepare_runtime();
+        let authored = next.surfaces[0].placement.clone();
+        replace_active_theme(&mut state, next, Some("new-theme.json".into()));
+        assert!(!state.auto_ejected);
+        assert!(!state.auto_ejected_for_capacity);
+        assert!(state.auto_ejected_origin.is_none());
+        assert!(state.auto_ejected_host.is_none());
+        assert_eq!(
+            effective_theme_from_state(&state).unwrap().surfaces[0].placement,
+            authored
+        );
+    }
+}
+
+fn ejected_state() -> AppState {
+    let mut state = state_for(ThemeDocument::starter(), placement("taskbar"));
+    state.placement_override = None;
+    state.active_theme_path = Some("current.json".into());
+    state.auto_ejected = true;
+    state.auto_ejected_for_capacity = true;
+    state.auto_ejected_origin = Some(POINT { x: 100, y: 100 });
+    state.auto_ejected_host = Some(app_settings::FloatingHost {
+        theme_id: state.active_theme.as_ref().unwrap().id.clone(),
+        surface_id: "main".into(),
+        width: 62,
+        height: 1080,
+    });
+    state
+}
+
+#[test]
+fn same_theme_refresh_preserves_fallback_until_the_configured_root_changes() {
+    let mut state = ejected_state();
+    let current = state.active_theme.clone().unwrap();
+    replace_active_theme(&mut state, current.clone(), Some("current.json".into()));
+    update_configured_placement(&mut state, None, 0, 0);
+    assert!(state.auto_ejected && state.auto_ejected_for_capacity);
+    assert_eq!(state.auto_ejected_origin.unwrap().x, 100);
+    assert!(state.auto_ejected_host.is_some());
+    // Editing an existing file must take effect even with the same theme id.
+    let mut edited = current.clone();
+    edited.surfaces[0].placement.nest = SurfaceNest::Desktop;
+    replace_active_theme(&mut state, edited, Some("current.json".into()));
+    assert!(!state.auto_ejected);
+    let mut state = ejected_state();
+    let mut edited = current.clone();
+    edited.surfaces[0].placement.offset_y += 1;
+    replace_active_theme(&mut state, edited, None);
+    assert!(!state.auto_ejected);
+    let mut state = ejected_state();
+    replace_active_theme(&mut state, current, Some("duplicate-id.json".into()));
+    assert!(!state.auto_ejected);
+}
+
+#[test]
+fn explicit_placement_changes_take_precedence_over_temporary_fallback() {
+    for nest in ["taskbar", "floating"] {
+        let mut state = ejected_state();
+        let mut saved = placement(nest);
+        saved.screen_x = 400;
+        saved.screen_y = 300;
+        update_configured_placement(&mut state, Some(saved.clone()), 0, 0);
+        assert!(!state.auto_ejected);
+        assert_eq!(state.placement_override, Some(saved.clone()));
+        // Selecting another theme retains the user's explicit placement.
+        let mut next = ThemeDocument::starter();
+        next.id = "new-theme".into();
+        replace_active_theme(&mut state, next, None);
+        assert_eq!(state.placement_override, Some(saved));
+    }
+    for (index, offset) in [(1, 0), (0, 50)] {
+        let mut state = ejected_state();
+        update_configured_placement(&mut state, None, index, offset);
+        assert!(!state.auto_ejected);
+    }
+}
+
+#[test]
+fn taskbar_lock_restores_auto_ejection_without_discarding_dock_placement() {
+    let mut saved = placement("taskbar");
+    saved.screen_x = 640;
+    saved.tray_offset = 80;
+    let mut state = state_for(ThemeDocument::starter(), saved.clone());
+    state.auto_ejected = true;
+    state.auto_ejected_origin = Some(POINT { x: 640, y: 900 });
+    state.auto_ejected_host = Some(app_settings::FloatingHost {
+        theme_id: "classic".into(),
+        surface_id: "main".into(),
+        width: 1920,
+        height: 46,
+    });
+    assert!(!clear_locked_auto_ejection(&mut state));
+    assert!(state.auto_ejected);
+    assert!(state.auto_ejected_origin.is_some());
+    assert!(state.auto_ejected_host.is_some());
+
+    state.lock_taskbar = true;
+    assert!(clear_locked_auto_ejection(&mut state));
+    assert!(!state.auto_ejected);
+    assert!(state.auto_ejected_origin.is_none());
+    assert!(state.auto_ejected_host.is_none());
+    assert_eq!(state.placement_override, Some(saved));
+    assert!(!clear_locked_auto_ejection(&mut state));
+}
+
+#[test]
+fn taskbar_lock_follows_configured_host_during_drag_and_auto_ejection() {
+    for nest in [
+        SurfaceNest::Taskbar,
+        SurfaceNest::TrayIcon,
+        SurfaceNest::Desktop,
+        SurfaceNest::Floating,
+    ] {
+        let mut theme = ThemeDocument::starter();
+        theme.surfaces[0].placement.nest = nest;
+        let mut state = state_for(theme, placement("taskbar"));
+        state.placement_override = None;
+        for locked in [false, true] {
+            state.lock_taskbar = locked;
+            // A drag temporarily detaches the HWND; it must retain its host policy.
+            state.dragging = true;
+            state.embedded = false;
+            assert_eq!(
+                taskbar_lock_applies(&state),
+                locked && nest == SurfaceNest::Taskbar
+            );
+            state.dragging = false;
+            state.auto_ejected = true;
+            assert_eq!(
+                taskbar_lock_applies(&state),
+                locked && nest == SurfaceNest::Taskbar
+            );
+        }
+    }
+}
+
+#[test]
+fn taskbar_lock_respects_saved_host_overrides_and_legacy_auto_hosts() {
+    let mut theme = ThemeDocument::starter();
+    theme.surfaces[0].placement.nest = SurfaceNest::Floating;
+    let mut state = state_for(theme, placement("taskbar"));
+    state.lock_taskbar = true;
+    assert!(taskbar_lock_applies(&state));
+    state.active_theme.as_mut().unwrap().surfaces[0]
+        .placement
+        .nest = SurfaceNest::Taskbar;
+    state.placement_override = Some(placement("floating"));
+    assert!(!taskbar_lock_applies(&state));
+    state.placement_override = None;
+    let surface = &mut state.active_theme.as_mut().unwrap().surfaces[0];
+    surface.placement.nest = SurfaceNest::Auto;
+    surface.placement.reference.region = ReferenceRegion::SystemTray;
+    assert!(taskbar_lock_applies(&state));
+    state.active_theme.as_mut().unwrap().surfaces[0]
+        .placement
+        .reference
+        .region = ReferenceRegion::Monitor;
+    assert!(!taskbar_lock_applies(&state));
+}
+
+#[test]
+fn taskbar_lock_leaves_intentional_floating_placement_unchanged() {
+    let saved = placement("floating");
+    let mut state = state_for(ThemeDocument::starter(), saved.clone());
+    state.lock_taskbar = true;
+    assert!(!taskbar_lock_applies(&state));
+    assert!(!clear_locked_auto_ejection(&mut state));
+    assert_eq!(state.placement_override, Some(saved));
 }
 
 #[test]
@@ -421,6 +650,402 @@ fn a_taskbar_without_a_tray_anchors_at_its_trailing_edge() {
         positioning::surface_screen_rect(&placement, 217, 46, 1.0, monitor, Some(taskbar), None);
     assert_eq!((rect.left, rect.right), (-227, -10));
     assert_eq!((rect.top, rect.bottom), (1034, 1080));
+}
+
+#[test]
+fn tray_movement_does_not_cause_app_collision_when_docked() {
+    let monitor = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    let taskbar = RECT {
+        top: 1032,
+        ..monitor
+    };
+    let tray = RECT {
+        left: 1600,
+        ..taskbar
+    };
+    // 500px of free space between apps and tray (apps end at 1100, tray starts at 1600)
+    let occupancy = collision_fixture(taskbar, Some(tray), Some(1100));
+    let docked = positioning::dock_placement(0, 0, 1.0, true);
+    let target =
+        positioning::surface_screen_rect(&docked, 200, 46, 1.0, monitor, Some(taskbar), Some(tray));
+    assert_eq!((target.left, target.right), (1400, 1600));
+
+    // When docked next to tray, overlaps_app_controls is false
+    assert!(!occupancy.overlaps_app_controls(target));
+
+    // When tray expands left by 50px (tray starts at 1550)
+    let expanded_tray = RECT {
+        left: 1550,
+        ..taskbar
+    };
+    let occupancy_expanded = collision_fixture(taskbar, Some(expanded_tray), Some(1100));
+    // Even before the widget repositions (target is still 1400..1600, overlapping expanded tray 1550..1600),
+    // it does NOT collide with app controls!
+    assert!(!occupancy_expanded.overlaps_app_controls(target));
+
+    // Only when app buttons expand into the widget area (e.g. apps reach 1450)
+    let crowded_occupancy = collision_fixture(taskbar, Some(expanded_tray), Some(1450));
+    assert!(crowded_occupancy.overlaps_app_controls(target));
+}
+
+#[test]
+fn smart_anchoring_remains_stationary_on_tray_change_and_clamps_when_pushed() {
+    let monitor = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    let taskbar = RECT {
+        top: 1032,
+        ..monitor
+    };
+    let initial_tray = RECT {
+        left: 1600,
+        ..taskbar
+    };
+
+    // User placed widget at fixed position x = 1200 on taskbar (width = 200)
+    let taskbar_placement = positioning::taskbar_dock_placement(0, 1200, 1.0, true);
+
+    // 1. Initial positioning: widget is at 1200..1400, tray is at 1600..1920
+    let rect1 = positioning::surface_screen_rect(
+        &taskbar_placement,
+        200,
+        46,
+        1.0,
+        monitor,
+        Some(taskbar),
+        Some(initial_tray),
+    );
+    assert_eq!((rect1.left, rect1.right), (1200, 1400));
+
+    // 2. Tray shifts left or right without reaching the widget (e.g. tray is at 1450 or 1700)
+    let shifted_tray = RECT {
+        left: 1450,
+        ..taskbar
+    };
+    let rect2 = positioning::surface_screen_rect(
+        &taskbar_placement,
+        200,
+        46,
+        1.0,
+        monitor,
+        Some(taskbar),
+        Some(shifted_tray),
+    );
+    // Widget stays completely stationary at 1200!
+    assert_eq!((rect2.left, rect2.right), (1200, 1400));
+
+    // 3. Tray expands so much that it pushes the widget (tray at 1350, max_x = 1150)
+    let encroaching_tray = RECT {
+        left: 1350,
+        ..taskbar
+    };
+    let rect3 = positioning::surface_screen_rect(
+        &taskbar_placement,
+        200,
+        46,
+        1.0,
+        monitor,
+        Some(taskbar),
+        Some(encroaching_tray),
+    );
+    // Protective clamp shifts widget left to 1150
+    assert_eq!((rect3.left, rect3.right), (1150, 1350));
+
+    // 4. Tray shrinks back to 1600: widget automatically returns to its original 1200 position!
+    let restored_rect = positioning::surface_screen_rect(
+        &taskbar_placement,
+        200,
+        46,
+        1.0,
+        monitor,
+        Some(taskbar),
+        Some(initial_tray),
+    );
+    assert_eq!((restored_rect.left, restored_rect.right), (1200, 1400));
+}
+
+#[test]
+fn smart_anchoring_tray_snapped_follows_tray_movement() {
+    let monitor = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    let taskbar = RECT {
+        top: 1032,
+        ..monitor
+    };
+    let initial_tray = RECT {
+        left: 1600,
+        ..taskbar
+    };
+
+    // When tray_offset == 0 (snapped to tray), dock_placement anchors to ReferenceRegion::SystemTray
+    let tray_snapped = positioning::dock_placement(0, 0, 1.0, true);
+
+    let rect1 = positioning::surface_screen_rect(
+        &tray_snapped,
+        200,
+        46,
+        1.0,
+        monitor,
+        Some(taskbar),
+        Some(initial_tray),
+    );
+    assert_eq!((rect1.left, rect1.right), (1400, 1600));
+
+    // When tray moves to 1550, snapped widget moves with it to 1350..1550
+    let moved_tray = RECT {
+        left: 1550,
+        ..taskbar
+    };
+    let rect2 = positioning::surface_screen_rect(
+        &tray_snapped,
+        200,
+        46,
+        1.0,
+        monitor,
+        Some(taskbar),
+        Some(moved_tray),
+    );
+    assert_eq!((rect2.left, rect2.right), (1350, 1550));
+}
+
+#[test]
+fn smart_anchoring_vertical_taskbar_anchors_to_top_edge_and_clamps() {
+    let monitor = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    let vertical_taskbar = RECT {
+        left: 0,
+        top: 0,
+        right: 60,
+        bottom: 1080,
+    };
+    let tray = RECT {
+        left: 0,
+        top: 900,
+        right: 60,
+        bottom: 1080,
+    };
+
+    // User docked widget at top offset y = 300 on a vertical taskbar
+    let placement = positioning::taskbar_dock_placement(0, 300, 1.0, false);
+    let rect = positioning::surface_screen_rect(
+        &placement,
+        50,
+        100,
+        1.0,
+        monitor,
+        Some(vertical_taskbar),
+        Some(tray),
+    );
+    // Top edge must be precisely at 300, not 200 (shifted by height)
+    assert_eq!(rect.top, 300);
+    assert_eq!(rect.bottom, 400);
+
+    // If tray expands upward to top = 350, clamp keeps widget from overlapping tray (max_y = 350 - 100 = 250)
+    let expanded_tray = RECT {
+        left: 0,
+        top: 350,
+        right: 60,
+        bottom: 1080,
+    };
+    let clamped = positioning::surface_screen_rect(
+        &placement,
+        50,
+        100,
+        1.0,
+        monitor,
+        Some(vertical_taskbar),
+        Some(expanded_tray),
+    );
+    assert_eq!(clamped.top, 250);
+    assert_eq!(clamped.bottom, 350);
+}
+
+#[test]
+fn smart_anchoring_clamp_does_not_panic_when_taskbar_is_crowded_or_tiny() {
+    let monitor = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    let taskbar = RECT {
+        left: 0,
+        top: 1032,
+        right: 1920,
+        bottom: 1080,
+    };
+    // Severe crowding: tray is at 100, widget width is 200 -> max_x = -100, which is < taskbar.left (0)
+    let crowded_tray = RECT {
+        left: 100,
+        top: 1032,
+        right: 1920,
+        bottom: 1080,
+    };
+    let placement = positioning::taskbar_dock_placement(0, 500, 1.0, true);
+    let rect = positioning::surface_screen_rect(
+        &placement,
+        200,
+        46,
+        1.0,
+        monitor,
+        Some(taskbar),
+        Some(crowded_tray),
+    );
+    // Must not panic with min > max, clamps safely to taskbar.left (0)
+    assert_eq!(rect.left, 0);
+}
+
+#[test]
+fn floating_taskbar_reference_is_not_clamped_to_tray() {
+    let monitor = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    let taskbar = RECT {
+        top: 1032,
+        ..monitor
+    };
+    let tray = RECT {
+        left: 1600,
+        ..taskbar
+    };
+    let mut placement = positioning::taskbar_dock_placement(0, 1700, 1.0, true);
+    placement.nest = SurfaceNest::Floating;
+    let rect = positioning::surface_screen_rect(
+        &placement,
+        200,
+        46,
+        1.0,
+        monitor,
+        Some(taskbar),
+        Some(tray),
+    );
+    assert_eq!(rect.left, 1700);
+}
+
+#[test]
+fn authored_taskbar_placements_keep_their_position_near_the_tray() {
+    let monitor = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    for horizontal in [true, false] {
+        let taskbar = if horizontal {
+            RECT {
+                top: 1032,
+                ..monitor
+            }
+        } else {
+            RECT {
+                right: 60,
+                ..monitor
+            }
+        };
+        let tray = if horizontal {
+            RECT {
+                left: 1600,
+                ..taskbar
+            }
+        } else {
+            RECT {
+                top: 900,
+                ..taskbar
+            }
+        };
+        // Exercise both edge alignment and the same anchors used by drag docking.
+        for edge_aligned in [true, false] {
+            let placement: theme_engine::Placement = serde_json::from_value(serde_json::json!({
+                "reference": { "region": "taskbar", "display": 0 },
+                "nest": "taskbar",
+                "horizontal": if horizontal && edge_aligned { "right" } else { "left" },
+                "vertical": if horizontal || edge_aligned { "bottom" } else { "top" },
+                "surface_horizontal": if horizontal && edge_aligned { "right" } else { "left" },
+                "surface_vertical": if horizontal || edge_aligned { "bottom" } else { "top" },
+                "offset_x": if horizontal && !edge_aligned { 1720 } else { 0 },
+                "offset_y": if !horizontal && !edge_aligned { 980 } else { 0 }
+            }))
+            .unwrap();
+            for tray in [Some(tray), None] {
+                let rect = positioning::surface_screen_rect(
+                    &placement,
+                    if horizontal { 200 } else { 50 },
+                    if horizontal { 46 } else { 100 },
+                    1.0,
+                    monitor,
+                    Some(taskbar),
+                    tray,
+                );
+                if horizontal {
+                    assert_eq!((rect.left, rect.right), (1720, 1920));
+                } else {
+                    assert_eq!((rect.top, rect.bottom), (980, 1080));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn drag_taskbar_clamp_is_not_saved_in_themes() {
+    let dragged = positioning::taskbar_dock_placement(0, 1700, 1.0, true);
+    assert!(dragged.clamp_taskbar_drag);
+    let json = serde_json::to_value(&dragged).unwrap();
+    assert!(json.get("clamp_taskbar_drag").is_none());
+    let loaded: theme_engine::Placement = serde_json::from_value(json).unwrap();
+    assert!(!loaded.clamp_taskbar_drag);
+}
+
+#[test]
+fn smart_anchoring_fractional_dpi_scaling() {
+    let monitor = RECT {
+        left: 0,
+        top: 0,
+        right: 2560,
+        bottom: 1440,
+    };
+    let taskbar = RECT {
+        left: 0,
+        top: 1392,
+        right: 2560,
+        bottom: 1440,
+    };
+    let tray = RECT {
+        left: 2100,
+        ..taskbar
+    };
+
+    // 1.25x scaling, screen offset = 1000 physical px
+    let placement = positioning::taskbar_dock_placement(0, 1000, 1.25, true);
+    let rect = positioning::surface_screen_rect(
+        &placement,
+        250,
+        46,
+        1.25,
+        monitor,
+        Some(taskbar),
+        Some(tray),
+    );
+    assert_eq!(rect.left, 1000);
 }
 
 // Fixture for the traditional leading-apps/trailing-tray arrangement. The

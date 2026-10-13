@@ -13,6 +13,7 @@ use super::{
 use crate::diagnose;
 use crate::models::{CreditsSection, UsageData};
 
+mod cli;
 mod limits;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -206,6 +207,7 @@ pub(super) fn try_usage_endpoint(token: &str) -> Result<Option<UsageData>, PollE
         .header("Authorization", &format!("Bearer {token}"))
         .header("anthropic-beta", "oauth-2025-04-20")
         .call()
+        .and_then(super::check_http_status)
     {
         Ok(resp) => resp,
         Err(error) => match classify_usage_failure(&error) {
@@ -351,6 +353,10 @@ fn claude_credits(spend: &SpendResponse, data: &UsageData) -> Option<CreditsSect
 }
 
 pub(super) fn fetch_usage_via_messages(token: &str) -> Result<UsageData, PollError> {
+    fetch_usage_via_messages_at(token, MESSAGES_URL)
+}
+
+fn fetch_usage_via_messages_at(token: &str, url: &str) -> Result<UsageData, PollError> {
     let agent = build_agent()?;
     let mut last_error = PollError::RequestFailed;
 
@@ -362,7 +368,10 @@ pub(super) fn fetch_usage_via_messages(token: &str) -> Result<UsageData, PollErr
         });
 
         let response = match agent
-            .post(MESSAGES_URL)
+            .post(url)
+            // A 429 still carries the usage and reset headers this probe needs.
+            // Keep polling them without recording or obeying a cooldown.
+            .extension(super::retry_after::BypassCooldown)
             .header("Authorization", &format!("Bearer {token}"))
             .header("anthropic-version", "2023-06-01")
             .header("anthropic-beta", "oauth-2025-04-20")
@@ -518,83 +527,28 @@ fn cli_refresh_token(source: &CredentialSource) {
 
 fn cli_refresh_windows_token(directory: &Path) {
     let claude_path = resolve_windows_claude_path();
-    let is_cmd = claude_path.to_lowercase().ends_with(".cmd");
     diagnose::log(format!(
-        "attempting Windows Claude token refresh via {claude_path}"
+        "checking Windows Claude token refresh support via {claude_path}"
     ));
-
-    let args: &[&str] = &["-p", "."];
-    let mut command = if is_cmd {
-        let mut command = Command::new("cmd.exe");
-        command.arg("/c").arg(&claude_path).args(args);
-        command
-    } else {
-        let mut command = Command::new(&claude_path);
-        command.args(args);
-        command
-    };
-    command
-        .env("CLAUDE_CONFIG_DIR", directory)
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT")
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            diagnose::log_error("unable to spawn Windows Claude token refresh", error);
-            return;
-        }
-    };
-    wait_for_refresh(&mut child);
+    cli::refresh(
+        cli::windows_command(&claude_path, directory, &["--version"]),
+        cli::windows_command(&claude_path, directory, cli::REFRESH_ARGS),
+    );
 }
 
 fn cli_refresh_wsl_token(distro: &str) {
     diagnose::log(format!(
-        "attempting WSL Claude token refresh in distro {distro}"
+        "checking WSL Claude token refresh support in distro {distro}"
     ));
-    let mut command = Command::new("wsl.exe");
-    command
-        .arg("-d")
-        .arg(distro)
-        .arg("--")
-        .arg("bash")
-        .arg("-lic")
-        .arg("export CLAUDE_CONFIG_DIR=\"$HOME/.claude\"; if command -v claude >/dev/null 2>&1; then claude -p .; elif [ -x \"$HOME/.local/bin/claude\" ]; then \"$HOME/.local/bin/claude\" -p .; else exit 127; fi")
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT")
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            diagnose::log_error("unable to spawn WSL Claude token refresh", error);
-            return;
-        }
-    };
-    wait_for_refresh(&mut child);
+    cli::refresh(
+        cli::wsl_command(distro, &["--version"]),
+        cli::wsl_command(distro, cli::REFRESH_ARGS),
+    );
 }
 
 fn resolve_windows_claude_path() -> String {
-    for name in ["claude.cmd", "claude"] {
-        if Command::new(name)
-            .arg("--version")
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok()
-        {
-            return name.to_string();
-        }
-    }
-
+    // Locate the executable first, then capture --version exactly once through
+    // the same command builder and account environment used for refresh.
     for name in ["claude.cmd", "claude"] {
         if let Ok(output) = Command::new("where.exe")
             .arg(name)
@@ -776,7 +730,9 @@ fn windows_credential_source() -> Option<CredentialSource> {
             .map(|directory| CredentialSource::Windows(directory.join(".credentials.json")));
     }
     Some(CredentialSource::Windows(
-        dirs::home_dir()?.join(".claude").join(".credentials.json"),
+        crate::known_folders::home_dir()?
+            .join(".claude")
+            .join(".credentials.json"),
     ))
 }
 
@@ -920,26 +876,94 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Option<std::pro
     }
 }
 
-fn wait_for_refresh(child: &mut std::process::Child) {
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() > Duration::from_secs(30) => {
-                let _ = child.kill();
-                break;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(500)),
-            Err(_) => break,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
 
+    #[test]
+    fn repeated_messages_probes_read_usage_and_resets_during_retry_after() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::time::Instant;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            for poll in 0..2 {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "probe {poll} never connected");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept failed: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("POST /v1/messages "));
+                let mut content_length = 0;
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                }
+                reader.read_exact(&mut vec![0; content_length]).unwrap();
+                let response = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\n\
+                     Retry-After: 7200\r\n\
+                     anthropic-ratelimit-unified-5h-utilization: 1\r\n\
+                     anthropic-ratelimit-unified-7d-utilization: {}\r\n\
+                     anthropic-ratelimit-unified-5h-reset: {}\r\n\
+                     anthropic-ratelimit-unified-7d-reset: {}\r\n\
+                     Content-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+                    if poll == 0 { "0.5" } else { "0.6" },
+                    1_800_000_000 + poll,
+                    1_800_100_000 + poll,
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let url = format!("http://{address}/v1/messages");
+        let readings = [
+            fetch_usage_via_messages_at("fixture-token", &url),
+            fetch_usage_via_messages_at("fixture-token", &url),
+        ];
+        server.join().unwrap();
+        for (poll, result) in readings.into_iter().enumerate() {
+            let data = result.expect("429 headers should remain readable on every poll");
+            assert!(data.session.available && data.weekly.available);
+            assert_eq!(data.session.percentage, 100.0);
+            assert_eq!(data.weekly.percentage, if poll == 0 { 50.0 } else { 60.0 });
+            assert_eq!(
+                data.session.resets_at,
+                unix_to_system_time(Some(1_800_000_000 + poll as i64))
+            );
+            assert_eq!(
+                data.weekly.resets_at,
+                unix_to_system_time(Some(1_800_100_000 + poll as i64))
+            );
+        }
+    }
     #[test]
     fn http_failures_keep_their_status_for_account_display() {
         for status in [401, 403, 429, 500, 503] {

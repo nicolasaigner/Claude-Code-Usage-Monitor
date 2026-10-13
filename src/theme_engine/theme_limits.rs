@@ -123,7 +123,14 @@ impl DataContext {
             let (owner, field) = name.split_once('.')?;
             if !matches!(
                 owner,
-                "claude" | "codex" | "antigravity" | "opencode" | "cursor" | "grok" | "active"
+                "claude"
+                    | "codex"
+                    | "antigravity"
+                    | "opencode"
+                    | "cursor"
+                    | "grok"
+                    | "copilot"
+                    | "active"
             ) {
                 return None;
             }
@@ -171,6 +178,23 @@ impl DataContext {
             .collect();
         keys.sort_unstable();
         keys
+    }
+
+    /// Prefixes such as `accounts.claude.work` for each named account.
+    pub fn account_prefixes(&self) -> Vec<&str> {
+        let mut prefixes: Vec<_> = self
+            .strings
+            .keys()
+            .filter_map(|key| key.strip_suffix(".name"))
+            .filter(|prefix| {
+                prefix
+                    .strip_prefix("accounts.")
+                    .and_then(|rest| rest.split_once('.'))
+                    .is_some_and(|(_, id)| valid_key(id))
+            })
+            .collect();
+        prefixes.sort_unstable();
+        prefixes
     }
 }
 
@@ -344,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn extra_limits_do_not_change_builtin_rendering_or_headlines() {
+    fn unrecognized_limits_do_not_change_builtin_rendering_or_headlines() {
         let plain_usage = UsageData {
             session: UsageSection {
                 available: true,
@@ -359,10 +383,14 @@ mod tests {
             ..Default::default()
         };
         let plain = AppUsageData::from_iter([(ProviderId::Claude, plain_usage.clone())]);
+        let mut extra_limit = limit();
+        extra_limit.key = "weekly_scoped_future".into();
+        extra_limit.label = "Future".into();
+        extra_limit.model = Some("Future".into());
         let extra = AppUsageData::from_iter([(
             ProviderId::Claude,
             UsageData {
-                limits: vec![limit()],
+                limits: vec![extra_limit],
                 ..plain_usage
             },
         )]);

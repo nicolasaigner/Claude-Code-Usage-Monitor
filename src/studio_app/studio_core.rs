@@ -51,13 +51,21 @@ impl StudioApp {
         owner: isize,
         initial_page: Page,
     ) -> Self {
+        style_native_titlebar(context);
+        Self::new_with_context(&context.egui_ctx, owner, initial_page)
+    }
+
+    pub(super) fn new_with_context(
+        context: &egui::Context,
+        owner: isize,
+        initial_page: Page,
+    ) -> Self {
         crate::diagnose::log_lazy(|| format!("dashboard started owner={owner}"));
         let settings = app_settings::load_settings();
         let language = localization::resolve_language(
             settings.language.as_deref().and_then(LanguageId::from_code),
         );
-        configure_style(&context.egui_ctx, language);
-        style_native_titlebar(context);
+        configure_style(context, language);
         let classic_theme_path = theme_engine::ensure_starter_theme().ok();
         let configured_path = settings.active_theme_path.as_ref().map(PathBuf::from);
         let configured_theme = configured_path
@@ -109,15 +117,17 @@ impl StudioApp {
             diagnostics: studio_diagnostics::DiagnosticsView::new(),
             page: initial_page,
             synced_poll_interval_ms: settings.poll_interval_ms,
+            synced_taskbar_lock: settings.lock_taskbar,
             poll_interval_editor_generation: 0,
             settings,
             startup_enabled: crate::window::is_startup_enabled(),
             theme,
             theme_path,
+            available_themes: AvailableThemesCache::new(theme_engine::themes_directory()),
             selection: Selection::Surface(0),
             preview: None,
             preview_dirty: true,
-            preview_renderer: PreviewRenderer::new(context.egui_ctx.clone()),
+            preview_renderer: PreviewRenderer::new(context.clone()),
             preview_generation: 0,
             preview_render_key: None,
             usage,
@@ -136,9 +146,7 @@ impl StudioApp {
             scene_width: DEFAULT_SCENE_WIDTH,
             inspector_width: DEFAULT_INSPECTOR_WIDTH,
             hovered_scene_item: None,
-            expression_helper: None,
-            action_helper: None,
-            text_template_helper: None,
+            helper: None,
             preview_mouse_overrides: HashMap::new(),
             preview_hover_target: None,
             preview_pending_click: None,
@@ -158,7 +166,6 @@ impl StudioApp {
             context_menu_path,
             context_menu_dirty: false,
             context_menu_selection: None,
-            context_menu_action_helper: None,
             delete_context_menu_confirmation: None,
         }
     }
@@ -205,11 +212,22 @@ impl StudioApp {
         self.synced_poll_interval_ms = persisted_interval;
     }
 
+    pub(super) fn sync_taskbar_lock(&mut self, persisted_lock: bool) {
+        // Preserve a local toggle; unrelated edits adopt the latest menu value.
+        if self.settings.lock_taskbar == self.synced_taskbar_lock {
+            self.settings.lock_taskbar = persisted_lock;
+        }
+        self.synced_taskbar_lock = persisted_lock;
+    }
+
     pub(super) fn save_settings(&mut self) {
-        self.sync_poll_interval(app_settings::load_settings().poll_interval_ms);
+        let persisted = app_settings::load_settings();
+        self.sync_poll_interval(persisted.poll_interval_ms);
+        self.sync_taskbar_lock(persisted.lock_taskbar);
         match app_settings::save_settings(&self.settings) {
             Ok(()) => {
                 self.synced_poll_interval_ms = self.settings.poll_interval_ms;
+                self.synced_taskbar_lock = self.settings.lock_taskbar;
                 self.settings_error = None;
                 self.notify_owner();
             }
@@ -244,6 +262,7 @@ impl StudioApp {
             }
         };
         self.theme_path = Some(path.clone());
+        self.available_themes.invalidate();
         self.settings.active_theme_path = Some(path.to_string_lossy().into_owned());
         self.settings.custom_theme_enabled = true;
         self.dirty = false;
@@ -285,9 +304,7 @@ impl StudioApp {
         self.dirty = false;
         self.theme_error = None;
         self.reset_history();
-        self.expression_helper = None;
-        self.action_helper = None;
-        self.text_template_helper = None;
+        self.close_helper(false);
         self.asset_picker = None;
         self.preview_mouse_overrides.clear();
         self.preview_hover_target = None;
@@ -314,12 +331,13 @@ impl StudioApp {
         }
         match theme_package::import_path(source) {
             Ok(imported) => {
+                self.available_themes.invalidate();
                 if let Some((menu, path)) = imported.context_menu {
                     self.context_menu = menu;
                     self.context_menu_path = Some(path);
                     self.context_menu_dirty = false;
                     self.context_menu_selection = None;
-                    self.context_menu_action_helper = None;
+                    self.close_helper(true);
                 }
                 if imported.imported_assets > 0 {
                     self.asset_thumbnails.clear();
@@ -503,9 +521,7 @@ impl StudioApp {
         self.selection = Selection::Surface(0);
         self.preview_dirty = true;
         self.dirty = true;
-        self.expression_helper = None;
-        self.action_helper = None;
-        self.text_template_helper = None;
+        self.close_helper(false);
         self.asset_picker = None;
         self.preview_mouse_overrides.clear();
         self.preview_hover_target = None;
@@ -524,9 +540,7 @@ impl StudioApp {
         self.selection = Selection::Surface(0);
         self.preview_dirty = true;
         self.dirty = true;
-        self.expression_helper = None;
-        self.action_helper = None;
-        self.text_template_helper = None;
+        self.close_helper(false);
         self.asset_picker = None;
         self.preview_mouse_overrides.clear();
         self.preview_hover_target = None;
@@ -713,6 +727,7 @@ impl StudioApp {
         if theme_engine::delete_theme(&deletion.path).is_err() {
             return;
         }
+        self.available_themes.invalidate();
 
         self.theme = fallback_theme;
         self.theme_path = Some(fallback_path.clone());
@@ -721,9 +736,7 @@ impl StudioApp {
         self.selection = Selection::Surface(0);
         self.preview_dirty = true;
         self.dirty = false;
-        self.expression_helper = None;
-        self.action_helper = None;
-        self.text_template_helper = None;
+        self.close_helper(false);
         self.asset_picker = None;
         self.preview_mouse_overrides.clear();
         self.preview_hover_target = None;
@@ -817,7 +830,9 @@ impl StudioApp {
         let now = Instant::now();
         self.last_cache_read = now;
         self.update_status = crate::dashboard::read_update_status(self.owner);
-        self.sync_poll_interval(app_settings::load_settings().poll_interval_ms);
+        let persisted = app_settings::load_settings();
+        self.sync_poll_interval(persisted.poll_interval_ms);
+        self.sync_taskbar_lock(persisted.lock_taskbar);
         let usage_changed =
             app_settings::load_usage_cache().is_some_and(|cache| self.update_usage_cache(cache));
         let countdown_due = self

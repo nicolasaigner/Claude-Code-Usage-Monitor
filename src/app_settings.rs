@@ -60,6 +60,8 @@ pub struct SettingsFile {
     show_cursor: bool,
     #[serde(default)]
     show_grok: bool,
+    #[serde(default)]
+    show_copilot: bool,
     #[serde(default = "default_true")]
     pub custom_theme_enabled: bool,
     /// Show what is left of each allowance instead of what has been spent, so
@@ -74,6 +76,10 @@ pub struct SettingsFile {
     pub dashboard_height: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub floating_card_opacity: Option<u8>,
+    /// Prevent auto-ejection and outside drops for widgets configured with a
+    /// taskbar host. Intentional floating, desktop and tray hosts are unaffected.
+    #[serde(default)]
+    pub lock_taskbar: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_override: Option<PlacementOverride>,
 }
@@ -83,6 +89,10 @@ pub struct PlacementOverride {
     pub nest: String,
     #[serde(default)]
     pub monitor_index: usize,
+    /// GDI device name (e.g. `\\.\DISPLAY2`) of the saved monitor. Enumeration
+    /// order can change between boots, so this wins over `monitor_index`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_device: Option<String>,
     #[serde(default)]
     pub screen_x: i32,
     #[serde(default)]
@@ -120,12 +130,14 @@ impl Default for SettingsFile {
             show_opencode: false,
             show_cursor: false,
             show_grok: false,
+            show_copilot: false,
             custom_theme_enabled: true,
             usage_countdown: false,
             active_theme_path: None,
             dashboard_width: None,
             dashboard_height: None,
             floating_card_opacity: None,
+            lock_taskbar: false,
             placement_override: None,
         }
     }
@@ -202,6 +214,7 @@ impl SettingsFile {
             ProviderId::OpenCode => self.show_opencode,
             ProviderId::Cursor => self.show_cursor,
             ProviderId::Grok => self.show_grok,
+            ProviderId::Copilot => self.show_copilot,
         }
     }
 
@@ -213,6 +226,7 @@ impl SettingsFile {
             ProviderId::OpenCode => self.show_opencode = enabled,
             ProviderId::Cursor => self.show_cursor = enabled,
             ProviderId::Grok => self.show_grok = enabled,
+            ProviderId::Copilot => self.show_copilot = enabled,
         }
     }
 
@@ -435,6 +449,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn taskbar_lock_is_opt_in_and_survives_settings_round_trip() {
+        assert!(!decode_settings("{}").unwrap().lock_taskbar);
+        for lock_taskbar in [false, true] {
+            let settings = SettingsFile {
+                lock_taskbar,
+                ..Default::default()
+            };
+            let decoded = decode_settings(&settings_json(&settings).to_string()).unwrap();
+            assert_eq!(decoded.lock_taskbar, lock_taskbar);
+        }
+    }
+
+    #[test]
     fn application_files_stay_inside_the_test_directory() {
         let root = app_data_directory();
         assert!(root.starts_with(std::env::temp_dir()));
@@ -549,6 +576,7 @@ mod tests {
             ProviderId::OpenCode,
             ProviderId::Cursor,
             ProviderId::Grok,
+            ProviderId::Copilot,
         ]));
 
         let json = settings_json(&settings);
@@ -558,6 +586,7 @@ mod tests {
         assert_eq!(json["show_opencode"], true);
         assert_eq!(json["show_cursor"], true);
         assert_eq!(json["show_grok"], true);
+        assert_eq!(json["show_copilot"], true);
 
         let decoded = decode_settings(&json.to_string()).unwrap();
         assert_eq!(decoded.enabled_providers(), settings.enabled_providers());
