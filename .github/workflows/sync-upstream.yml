@@ -2,8 +2,9 @@ name: Sync upstream
 
 # Merges each new upstream release into main and publishes a fork release on
 # top of it, so the fork follows upstream without losing its own commits.
-# A conflict (or a push the default token may not make) opens an issue and
-# stops; nothing is force-pushed.
+# A conflict (or a push the default token may not make) fails the run with
+# the reason in its summary; nothing is force-pushed. Issues are disabled on
+# this fork, so the failed-run notification is the alert.
 
 on:
   schedule:
@@ -12,7 +13,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
 
 concurrency:
   group: sync-upstream
@@ -24,15 +24,13 @@ jobs:
     outputs:
       tag: ${{ steps.merge.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
 
       - name: Merge the latest upstream release
         id: merge
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -48,8 +46,8 @@ jobs:
           fi
 
           fail() {
-            gh issue create --title "Sync with upstream $utag needs attention" \
-              --body "$1"$'\n\n'"Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" || true
+            printf '## Sync with upstream %s needs attention\n\n%s\n' "$utag" "$1" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Sync with upstream $utag needs attention::$(printf '%s' "$1" | head -n1)"
             exit 1
           }
 
